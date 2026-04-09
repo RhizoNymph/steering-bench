@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "steering-bench"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "matplotlib>=3.8",
+    "plotly>=5.18",
+]
+
+[project.optional-dependencies]
+vllm = ["vllm"]
+transformerlens = ["transformer-lens>=2.0"]
+nnsight = ["nnsight>=0.3"]
+repeng = ["repeng>=0.3"]
+pyvene = ["pyvene>=0.1"]
+all-external = [
+    "transformer-lens>=2.0",
+    "nnsight>=0.3",
+    "repeng>=0.3",
+    "pyvene>=0.1",
+]
+all = ["steering-bench[vllm,all-external]"]
+dev = ["pytest>=8.0", "ruff>=0.3", "mypy>=1.8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
