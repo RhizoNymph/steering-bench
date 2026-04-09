@@ -49,7 +49,19 @@ All results share a common JSON schema with environment metadata, parameters, an
 - doc: docs/features/vllm_benchmarks.md
 
 ### ablation_benchmarks
-- description: Optimization interaction tests (CUDA graphs x steering)
-- entry_points: [scripts/bench_cuda_graphs.py]
+- description: Optimization interaction tests (CUDA graphs, config scaling, hook points)
+- entry_points: [scripts/bench_cuda_graphs.py, scripts/bench_config_scaling.py, scripts/bench_hook_points.py]
 - depends_on: [core]
 - doc: docs/features/ablation_benchmarks.md
+
+### external_comparison
+- description: Cross-library steering performance comparison (TransformerLens, nnsight, repeng, pyvene vs vLLM)
+- entry_points: [scripts/bench_external.py]
+- depends_on: [core]
+- doc: docs/features/external_comparison.md
+
+### analysis
+- description: Result aggregation and matplotlib chart generation
+- entry_points: [scripts/analyze.py]
+- depends_on: [core]
+- doc: docs/features/analysis.md
