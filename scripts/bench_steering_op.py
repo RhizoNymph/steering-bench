@@ -20,7 +20,7 @@ from steering_bench.timing import cuda_timer
 
 # Try to use the registered custom op; fall back to reference impl
 try:
-    import vllm  # noqa: F401 — triggers op registration
+    import vllm.model_executor.layers.steering  # noqa: F401 — triggers op registration
 
     def apply_steering(
         hidden_states: torch.Tensor,
@@ -30,7 +30,7 @@ try:
         return torch.ops.vllm.apply_steering(hidden_states, steering_table, steering_index)
 
     IMPL = "custom_op"
-except ImportError:
+except (ImportError, AttributeError):
 
     def apply_steering(
         hidden_states: torch.Tensor,
