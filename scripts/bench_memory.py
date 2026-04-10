@@ -90,12 +90,18 @@ def measure_model_memory(
     enable_steering: bool,
     max_steering_configs: int,
     baseline_mb: float,
+    num_gpu_blocks_override: int,
+    gpu_memory_utilization: float,
 ) -> dict[str, float]:
     """Load model, measure GPU memory, unload.
 
     Args:
         baseline_mb: GPU used-memory in MB before loading (from the
             very first call, representing the empty-GPU state).
+        num_gpu_blocks_override: Force a fixed KV cache size so the
+            delta between configs only reflects steering buffers,
+            not variation in KV cache profiling.
+        gpu_memory_utilization: Upper bound on vLLM's GPU memory use.
 
     Returns:
         dict with allocated_mb (model+buffers), delta_from_baseline_mb.
@@ -109,8 +115,9 @@ def measure_model_memory(
 
     kwargs = {
         "model": model,
-        "gpu_memory_utilization": 0.9,
+        "gpu_memory_utilization": gpu_memory_utilization,
         "max_model_len": 2048,
+        "num_gpu_blocks_override": num_gpu_blocks_override,
     }
     if enable_steering:
         kwargs["enable_steering"] = True
@@ -138,6 +145,21 @@ def main():
     parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument("--output-dir", default="results/vllm/")
     parser.add_argument("--configs-sweep", default="0,4,8,16,32")
+    parser.add_argument(
+        "--num-gpu-blocks",
+        type=int,
+        default=256,
+        help="Force a fixed KV cache size (in blocks). Smaller = cleaner "
+             "steering delta measurement. Must be large enough for the model "
+             "profiling step to succeed.",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.5,
+        help="Upper bound on vLLM's GPU memory usage. Lower leaves more "
+             "headroom for the measurement.",
+    )
     parser.add_argument("--tag", default="")
     args = parser.parse_args()
 
@@ -153,6 +175,7 @@ def main():
     print(f"Config counts: {config_counts}")
     print(f"hidden_size={model_config['hidden_size']}, num_layers={model_config['num_layers']}")
     print(f"Empty-GPU baseline: {empty_gpu_mb:.1f} MB (other processes on device)")
+    print(f"Fixed KV blocks: {args.num_gpu_blocks}, gpu_util: {args.gpu_memory_utilization}")
     print()
 
     all_results = []
@@ -165,7 +188,14 @@ def main():
 
         print(f"  Loading model...", flush=True)
         try:
-            mem = measure_model_memory(args.model, enable, max_configs, baseline_mb=empty_gpu_mb)
+            mem = measure_model_memory(
+                args.model,
+                enable,
+                max_configs,
+                baseline_mb=empty_gpu_mb,
+                num_gpu_blocks_override=args.num_gpu_blocks,
+                gpu_memory_utilization=args.gpu_memory_utilization,
+            )
         except torch.cuda.OutOfMemoryError:
             print(f"  OOM!")
             all_results.append({
