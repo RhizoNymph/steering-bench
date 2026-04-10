@@ -148,15 +148,16 @@ def main():
     parser.add_argument(
         "--num-gpu-blocks",
         type=int,
-        default=256,
+        default=64,
         help="Force a fixed KV cache size (in blocks). Smaller = cleaner "
              "steering delta measurement. Must be large enough for the model "
-             "profiling step to succeed.",
+             "profiling step to succeed. Will auto-retry with smaller values "
+             "on OOM.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.5,
+        default=0.6,
         help="Upper bound on vLLM's GPU memory usage. Lower leaves more "
              "headroom for the measurement.",
     )
@@ -186,18 +187,35 @@ def main():
         label = f"max_configs={max_configs}" if enable else "steering_off"
         print(f"--- {label} ---")
 
-        print(f"  Loading model...", flush=True)
-        try:
-            mem = measure_model_memory(
-                args.model,
-                enable,
-                max_configs,
-                baseline_mb=empty_gpu_mb,
-                num_gpu_blocks_override=args.num_gpu_blocks,
-                gpu_memory_utilization=args.gpu_memory_utilization,
-            )
-        except torch.cuda.OutOfMemoryError:
-            print(f"  OOM!")
+        # Retry with progressively smaller KV cache on OOM
+        retry_blocks = [args.num_gpu_blocks, 32, 16, 8]
+        mem = None
+        used_blocks = None
+        for attempt_blocks in retry_blocks:
+            print(f"  Loading model (num_gpu_blocks={attempt_blocks})...", flush=True)
+            try:
+                mem = measure_model_memory(
+                    args.model,
+                    enable,
+                    max_configs,
+                    baseline_mb=empty_gpu_mb,
+                    num_gpu_blocks_override=attempt_blocks,
+                    gpu_memory_utilization=args.gpu_memory_utilization,
+                )
+                used_blocks = attempt_blocks
+                break
+            except (torch.cuda.OutOfMemoryError, ValueError) as e:
+                # ValueError catches vLLM's "not enough memory" startup check
+                if "OOM" in str(e) or "memory" in str(e).lower():
+                    print(f"    OOM/memory error at {attempt_blocks} blocks, retrying smaller...")
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    _wait_for_gpu_settle(target_mb=empty_gpu_mb, tolerance_mb=500.0)
+                    continue
+                raise
+
+        if mem is None:
+            print(f"  Skipped: OOM at all retry levels")
             all_results.append({
                 "max_configs": max_configs,
                 "results": {"error": "OOM"},
