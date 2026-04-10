@@ -52,19 +52,60 @@ def theoretical_memory_bytes(
     }
 
 
+def _gpu_used_mb(device: int = 0) -> float:
+    """Return total GPU memory used on *device* in MB.
+
+    Uses torch.cuda.mem_get_info which queries the driver directly,
+    so it sees memory held by other processes (including vLLM's
+    EngineCore subprocess on v1). torch.cuda.memory_allocated()
+    only sees the current process's tensors and returns 0 for
+    subprocess-allocated memory.
+    """
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    return (total_bytes - free_bytes) / (1024 * 1024)
+
+
+def _wait_for_gpu_settle(
+    target_mb: float,
+    tolerance_mb: float = 100.0,
+    max_wait_sec: float = 30.0,
+) -> None:
+    """Poll until GPU used memory is within tolerance of target.
+
+    After `del llm`, vLLM's subprocess may take a few seconds to
+    release memory. This polls every 0.5s until we're within
+    `tolerance_mb` of `target_mb` or `max_wait_sec` elapses.
+    """
+    import time
+    deadline = time.time() + max_wait_sec
+    while time.time() < deadline:
+        used = _gpu_used_mb()
+        if abs(used - target_mb) <= tolerance_mb:
+            return
+        time.sleep(0.5)
+
+
 def measure_model_memory(
     model: str,
     enable_steering: bool,
     max_steering_configs: int,
+    baseline_mb: float,
 ) -> dict[str, float]:
-    """Load model, measure GPU memory, unload."""
+    """Load model, measure GPU memory, unload.
+
+    Args:
+        baseline_mb: GPU used-memory in MB before loading (from the
+            very first call, representing the empty-GPU state).
+
+    Returns:
+        dict with allocated_mb (model+buffers), delta_from_baseline_mb.
+    """
     from vllm import LLM
 
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.empty_cache()
     gc.collect()
+    torch.cuda.empty_cache()
 
-    mem_before = torch.cuda.memory_allocated() / (1024 * 1024)
+    mem_before = _gpu_used_mb()
 
     kwargs = {
         "model": model,
@@ -77,17 +118,18 @@ def measure_model_memory(
 
     llm = LLM(**kwargs)
 
-    mem_after = torch.cuda.memory_allocated() / (1024 * 1024)
-    mem_peak = torch.cuda.max_memory_allocated() / (1024 * 1024)
+    mem_after_load = _gpu_used_mb()
 
     del llm
     gc.collect()
     torch.cuda.empty_cache()
+    # Wait for EngineCore subprocess to fully release memory
+    _wait_for_gpu_settle(target_mb=baseline_mb, tolerance_mb=200.0)
 
     return {
-        "allocated_mb": mem_after,
-        "peak_mb": mem_peak,
-        "delta_from_zero_mb": mem_after - mem_before,
+        "allocated_mb": mem_after_load,
+        "delta_from_baseline_mb": mem_after_load - baseline_mb,
+        "delta_from_before_mb": mem_after_load - mem_before,
     }
 
 
@@ -102,9 +144,15 @@ def main():
     config_counts = [int(x) for x in args.configs_sweep.split(",")]
     model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
 
+    # Capture empty-GPU baseline (before any model is loaded)
+    gc.collect()
+    torch.cuda.empty_cache()
+    empty_gpu_mb = _gpu_used_mb()
+
     print(f"Memory benchmark: {args.model}")
     print(f"Config counts: {config_counts}")
     print(f"hidden_size={model_config['hidden_size']}, num_layers={model_config['num_layers']}")
+    print(f"Empty-GPU baseline: {empty_gpu_mb:.1f} MB (other processes on device)")
     print()
 
     all_results = []
@@ -117,7 +165,7 @@ def main():
 
         print(f"  Loading model...", flush=True)
         try:
-            mem = measure_model_memory(args.model, enable, max_configs)
+            mem = measure_model_memory(args.model, enable, max_configs, baseline_mb=empty_gpu_mb)
         except torch.cuda.OutOfMemoryError:
             print(f"  OOM!")
             all_results.append({
@@ -126,7 +174,10 @@ def main():
             })
             continue
 
-        print(f"  allocated: {mem['allocated_mb']:.1f} MB, peak: {mem['peak_mb']:.1f} MB")
+        print(
+            f"  allocated: {mem['allocated_mb']:.1f} MB "
+            f"(delta from empty: {mem['delta_from_baseline_mb']:.1f} MB)"
+        )
 
         if max_configs == 0:
             baseline_allocated = mem["allocated_mb"]
@@ -134,7 +185,7 @@ def main():
         steering_delta_mb = None
         if baseline_allocated is not None:
             steering_delta_mb = mem["allocated_mb"] - baseline_allocated
-            print(f"  steering delta: {steering_delta_mb:.1f} MB")
+            print(f"  steering delta vs configs=0: {steering_delta_mb:.1f} MB")
 
         # Theoretical
         if max_configs > 0:
@@ -154,7 +205,7 @@ def main():
         }
         results = {
             "allocated_mb": mem["allocated_mb"],
-            "peak_mb": mem["peak_mb"],
+            "delta_from_baseline_mb": mem["delta_from_baseline_mb"],
         }
         if steering_delta_mb is not None:
             results["steering_delta_mb"] = steering_delta_mb
