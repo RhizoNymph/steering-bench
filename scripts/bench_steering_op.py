@@ -19,9 +19,16 @@ from steering_bench.output import print_result_summary, write_result
 from steering_bench.timing import cuda_timer
 
 # Try to use the registered custom op; fall back to reference impl
+_has_custom_op = False
 try:
     import vllm.model_executor.layers.steering  # noqa: F401 — triggers op registration
+    _has_custom_op = hasattr(torch.ops, "vllm") and hasattr(torch.ops.vllm, "apply_steering")
+    if not _has_custom_op:
+        print("[info] vllm.model_executor.layers.steering imported but op not registered")
+except Exception as _e:
+    print(f"[info] falling back to reference impl: {type(_e).__name__}: {_e}")
 
+if _has_custom_op:
     def apply_steering(
         hidden_states: torch.Tensor,
         steering_table: torch.Tensor,
@@ -30,7 +37,7 @@ try:
         return torch.ops.vllm.apply_steering(hidden_states, steering_table, steering_index)
 
     IMPL = "custom_op"
-except (ImportError, AttributeError):
+else:
 
     def apply_steering(
         hidden_states: torch.Tensor,
