@@ -20,12 +20,14 @@ dependencies = [
 vllm = ["vllm"]
 transformerlens = ["transformer-lens>=2.0"]
 nnsight = ["nnsight>=0.3"]
+# repeng pins numpy<2 which conflicts with vllm (numpy>=2).
+# Install repeng in a SEPARATE environment: `uv pip install repeng`
 repeng = ["repeng>=0.3"]
 pyvene = ["pyvene>=0.1"]
+# Excludes repeng due to numpy version conflict with vllm.
 all-external = [
     "transformer-lens>=2.0",
     "nnsight>=0.3",
-    "repeng>=0.3",
     "pyvene>=0.1",
 ]
 all = ["steering-bench[vllm,all-external]"]
