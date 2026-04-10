@@ -100,12 +100,25 @@ def profile_mode(
     if torch.cuda.is_available():
         activities.append(ProfilerActivity.CUDA)
 
+    # Newer PyTorch renamed cuda_* attributes to device_* for backend-agnostic
+    # profiling. Detect which names are available.
+    def _device_time_total(avg) -> float:
+        if hasattr(avg, "device_time_total"):
+            return avg.device_time_total
+        return getattr(avg, "cuda_time_total", 0.0)
+
+    def _self_device_time_total(avg) -> float:
+        if hasattr(avg, "self_device_time_total"):
+            return avg.self_device_time_total
+        return getattr(avg, "self_cuda_time_total", 0.0)
+
     print(f"  Profiling ({iters} iters)...", flush=True)
     with profile(
         activities=activities,
         record_shapes=False,
         with_stack=False,
         profile_memory=False,
+        acc_events=True,  # keep events across iters instead of clearing each cycle
     ) as prof:
         for _ in range(iters):
             llm.generate(prompts, sp_list)
@@ -117,7 +130,7 @@ def profile_mode(
 
     # Detect if the profiler saw any CUDA activity
     averages = list(prof.key_averages())
-    cuda_total = sum(a.cuda_time_total for a in averages) / 1000.0  # ms
+    cuda_total = sum(_device_time_total(a) for a in averages) / 1000.0  # ms
     cpu_total = sum(a.self_cpu_time_total for a in averages) / 1000.0  # ms
     print(f"  Total captured: cpu={cpu_total:.1f}ms cuda={cuda_total:.1f}ms")
 
@@ -128,11 +141,18 @@ def profile_mode(
             "was respected, or use Nsight Systems instead (see script docstring)."
         )
 
+    # Figure out which sort key to use for newer vs older torch
+    try:
+        cuda_sort_key = "device_time_total"
+        _ = prof.key_averages().table(sort_by=cuda_sort_key, row_limit=1)
+    except (AssertionError, ValueError, KeyError):
+        cuda_sort_key = "cuda_time_total"
+
     # Top CUDA events
-    print(f"\n  Top 20 CUDA events (by cuda_time_total):")
+    print(f"\n  Top 20 CUDA events (by {cuda_sort_key}):")
     print(
         prof.key_averages().table(
-            sort_by="cuda_time_total",
+            sort_by=cuda_sort_key,
             row_limit=20,
         )
     )
@@ -155,9 +175,11 @@ def profile_mode(
             steering_events.append(avg)
 
     if steering_events:
-        for avg in sorted(steering_events, key=lambda a: a.cuda_time_total, reverse=True):
+        for avg in sorted(
+            steering_events, key=lambda a: _device_time_total(a), reverse=True
+        ):
             cpu_ms = avg.self_cpu_time_total / 1000.0
-            cuda_ms = avg.cuda_time_total / 1000.0
+            cuda_ms = _device_time_total(avg) / 1000.0
             print(
                 f"    {avg.key[:60]:<60} "
                 f"cpu={cpu_ms:>8.2f}ms cuda={cuda_ms:>8.2f}ms count={avg.count:>6}"
