@@ -7,7 +7,9 @@ name = "steering-bench"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.4",
+    # torch pinned to match the version vLLM was compiled against.
+    # Loose specs cause uv run to auto-upgrade and break NCCL ABI.
+    "torch==2.10.0",
     "numpy>=1.26",
     "pandas>=2.1",
     "matplotlib>=3.8",
