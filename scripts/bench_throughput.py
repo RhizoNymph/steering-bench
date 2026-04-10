@@ -121,11 +121,17 @@ def run_throughput(
     ]
     throughput_stats = compute_stats(throughput_samples)
 
+    # Rename throughput stat keys from *_ms (misleading since the unit is
+    # tokens/sec, not milliseconds) to *_tps.
+    throughput_dict = {
+        k.replace("_ms", "_tps"): v
+        for k, v in throughput_stats.to_dict().items()
+        if k != "samples_ms"
+    }
+
     return {
         "latency_ms": {k: v for k, v in latency_stats.to_dict().items() if k != "samples_ms"},
-        "throughput_tokens_per_sec": {
-            k: v for k, v in throughput_stats.to_dict().items() if k != "samples_ms"
-        },
+        "throughput_tokens_per_sec": throughput_dict,
         "avg_output_tokens": avg_output_tokens,
         "total_tokens_per_iter": total_tokens_per_iter,
         "samples_ms": samples_ms,
@@ -172,7 +178,7 @@ def main():
                 num_layers=config["num_layers"],
             )
 
-            mean_tps = result["throughput_tokens_per_sec"]["mean_ms"]  # it's actually mean value
+            mean_tps = result["throughput_tokens_per_sec"]["mean_tps"]
             mean_latency = result["latency_ms"]["mean_ms"]
             print(f"    throughput: {mean_tps:.0f} tokens/sec")
             print(f"    batch latency: {mean_latency:.0f} ms")
@@ -225,7 +231,7 @@ def main():
         if "error" in res:
             print(f"{r['distinct_configs']:>10} {'OOM':>14}")
             continue
-        tps = res["throughput_tokens_per_sec"]["mean_ms"]
+        tps = res["throughput_tokens_per_sec"]["mean_tps"]
         lat = res["latency_ms"]["mean_ms"]
         loss = res.get("throughput_loss_pct")
         loss_str = f"{loss:.1f}%" if loss is not None else "baseline"
