@@ -71,6 +71,7 @@ def run_mode(
     iters: int,
     hidden_size: int,
     num_layers: int,
+    enable_prefix_caching: bool = True,
 ) -> dict:
     """Run a single (mode, batch_size) configuration and return results."""
     from vllm import LLM, SamplingParams
@@ -80,12 +81,16 @@ def run_mode(
     enable_steering = mode != "disabled"
     max_configs = 8 if mode == "per_request_4" else 4
 
-    print(f"    Loading model (enable_steering={enable_steering}, max_configs={max_configs})...",
-          flush=True)
+    print(
+        f"    Loading model (enable_steering={enable_steering}, "
+        f"max_configs={max_configs}, prefix_cache={enable_prefix_caching})...",
+        flush=True,
+    )
     llm = LLM(
         model=model,
         enable_steering=enable_steering,
         max_steering_configs=max_configs,
+        enable_prefix_caching=enable_prefix_caching,
         gpu_memory_utilization=0.9,
         max_model_len=2048,
     )
@@ -146,6 +151,12 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--batch-sizes", default="1,4,8,16")
     parser.add_argument("--prompt-len", type=int, default=64)
+    parser.add_argument(
+        "--disable-prefix-cache",
+        action="store_true",
+        help="Disable vLLM prefix caching. Use to isolate its effect on "
+             "per_request steering overhead.",
+    )
     parser.add_argument("--tag", default="")
     args = parser.parse_args()
 
@@ -185,6 +196,7 @@ def main():
                 iters=args.iters,
                 hidden_size=hidden_size,
                 num_layers=num_layers,
+                enable_prefix_caching=not args.disable_prefix_cache,
             )
 
             if "error" not in result:
@@ -215,6 +227,7 @@ def main():
                 "max_tokens": args.max_tokens,
                 "hidden_size": hidden_size,
                 "num_layers": num_layers,
+                "prefix_caching": not args.disable_prefix_cache,
             }
             results_dict = {
                 "latency_ms": {k: v for k, v in result.items() if k != "samples_ms"},
