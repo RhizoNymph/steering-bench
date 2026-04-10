@@ -44,19 +44,26 @@ def run_throughput(
     iters: int,
     hidden_size: int,
     num_layers: int,
+    max_steering_configs_override: int | None = None,
+    enable_prefix_caching: bool = True,
 ) -> dict:
     """Run throughput benchmark for a given config count."""
     from vllm import LLM, SamplingParams
 
     enable_steering = distinct_configs > 0
-    max_steering = max(distinct_configs, 4) if enable_steering else 4
+    if max_steering_configs_override is not None:
+        max_steering = max_steering_configs_override
+    else:
+        max_steering = max(distinct_configs, 4) if enable_steering else 4
 
     print(f"    Loading model (steering={'on' if enable_steering else 'off'}, "
-          f"max_configs={max_steering})...", flush=True)
+          f"max_configs={max_steering}, prefix_cache={enable_prefix_caching})...",
+          flush=True)
     llm = LLM(
         model=model,
         enable_steering=enable_steering,
         max_steering_configs=max_steering,
+        enable_prefix_caching=enable_prefix_caching,
         gpu_memory_utilization=0.9,
         max_model_len=2048,
     )
@@ -148,6 +155,19 @@ def main():
     parser.add_argument("--prompt-len", type=int, default=64)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--configs-sweep", default="0,1,4,8")
+    parser.add_argument(
+        "--max-steering-configs",
+        type=int,
+        default=None,
+        help="Override auto-computed max_steering_configs. "
+             "Default = max(distinct_configs, 4). Use this to test if a "
+             "larger table reduces thrashing with a fixed workload.",
+    )
+    parser.add_argument(
+        "--disable-prefix-cache",
+        action="store_true",
+        help="Disable vLLM prefix caching (to isolate its effect on throughput).",
+    )
     parser.add_argument("--tag", default="")
     args = parser.parse_args()
 
@@ -176,6 +196,8 @@ def main():
                 iters=args.iters,
                 hidden_size=config["hidden_size"],
                 num_layers=config["num_layers"],
+                max_steering_configs_override=args.max_steering_configs,
+                enable_prefix_caching=not args.disable_prefix_cache,
             )
 
             mean_tps = result["throughput_tokens_per_sec"]["mean_tps"]
@@ -196,12 +218,19 @@ def main():
             result = {"error": "OOM"}
             overhead_pct = None
 
+        effective_max_configs = (
+            args.max_steering_configs
+            if args.max_steering_configs is not None
+            else (max(distinct_configs, 4) if distinct_configs > 0 else 4)
+        )
         params = {
             "model": args.model,
             "distinct_configs": distinct_configs,
+            "max_steering_configs": effective_max_configs,
             "num_prompts": args.num_prompts,
             "prompt_len": args.prompt_len,
             "max_tokens": args.max_tokens,
+            "prefix_caching": not args.disable_prefix_cache,
         }
         results_out = {k: v for k, v in result.items() if k != "samples_ms"}
         if overhead_pct is not None:
