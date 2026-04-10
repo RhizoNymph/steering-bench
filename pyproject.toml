@@ -18,6 +18,9 @@ dependencies = [
 
 [project.optional-dependencies]
 vllm = ["vllm"]
+
+[tool.uv.sources]
+vllm = { path = "/home/nymph/Code/vllm", editable = true }
 transformerlens = ["transformer-lens>=2.0"]
 nnsight = ["nnsight>=0.3"]
 repeng = ["repeng>=0.3"]
