@@ -30,15 +30,20 @@ def theoretical_memory_bytes(
     hidden_size: int,
     max_steering_configs: int,
     max_batched_tokens: int = 8192,
+    dtype_bytes: int = 2,
 ) -> dict[str, int]:
     """Compute theoretical steering buffer memory cost.
 
     Per layer:
-      3 hooks * (max_configs + 3) * hidden_size * 4 bytes (float32 tables)
+      3 hooks * (max_configs + 3) * hidden_size * dtype_bytes (bf16=2, fp16=2, fp32=4)
     Shared:
-      max_batched_tokens * 8 bytes (int64 steering_index, but shared across layers)
+      max_batched_tokens * 8 bytes (int64 steering_index, one shared across layers)
+
+    Note: steering table buffers are registered as float32 by default but
+    get cast to the model's dtype when the module is moved to the model's
+    precision. For Gemma-3-4B (bf16), dtype_bytes=2.
     """
-    table_bytes_per_layer = 3 * (max_steering_configs + 3) * hidden_size * 4
+    table_bytes_per_layer = 3 * (max_steering_configs + 3) * hidden_size * dtype_bytes
     total_table_bytes = num_layers * table_bytes_per_layer
     index_bytes = max_batched_tokens * 8  # int64, shared across layers
     total = total_table_bytes + index_bytes
@@ -49,6 +54,7 @@ def theoretical_memory_bytes(
         "index_bytes": index_bytes,
         "total_bytes": total,
         "total_mb": total / (1024 * 1024),
+        "dtype_bytes": dtype_bytes,
     }
 
 
