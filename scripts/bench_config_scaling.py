@@ -23,6 +23,18 @@ from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import random_steering_vectors_diverse
 
+
+def _gpu_used_mb(device: int = 0) -> float:
+    """Return total GPU memory used on *device* in MB.
+
+    Uses torch.cuda.mem_get_info which queries the driver directly,
+    so it sees memory held by vLLM's EngineCore subprocess.
+    torch.cuda.memory_allocated() only sees the current process's
+    tensors and returns 0 for subprocess-allocated memory.
+    """
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    return (total_bytes - free_bytes) / (1024 * 1024)
+
 MODEL_CONFIGS = {
     "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
     "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
@@ -59,8 +71,8 @@ def run_config(
         max_model_len=2048,
     )
 
-    # Memory after model load
-    allocated_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+    # Memory after model load — use mem_get_info to see subprocess allocations
+    allocated_mb = _gpu_used_mb()
 
     prompts = make_prompts(batch_size, prompt_len)
 
