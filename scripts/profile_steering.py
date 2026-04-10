@@ -196,7 +196,16 @@ def profile_mode(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Profile steering overhead")
+    parser = argparse.ArgumentParser(
+        description="Profile steering overhead (one mode per invocation)",
+        epilog=(
+            "Run this script TWICE — once per mode — because in-process "
+            "vLLM (needed for the profiler to see worker kernels) does "
+            "not reliably release GPU memory between LLM instances:\n"
+            "    python scripts/profile_steering.py --mode disabled\n"
+            "    python scripts/profile_steering.py --mode steering\n"
+        ),
+    )
     parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument("--output-dir", default="results/profile/")
     parser.add_argument("--warmup", type=int, default=2)
@@ -214,6 +223,18 @@ def main():
         default=64,
         help="Reduce for faster profiling. Default 64 for speed.",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["disabled", "steering"],
+        required=True,
+        help="Which mode to profile. Run the script twice, once per mode.",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help="Passed through to vLLM. Lower if running alongside other GPU workloads.",
+    )
     args = parser.parse_args()
 
     model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
@@ -229,74 +250,50 @@ def main():
 
     prompts = make_prompts(args.batch_size, args.prompt_len)
 
-    # Profile each mode
-    summary: dict[str, dict] = {}
+    from vllm import LLM
 
-    for mode in ["disabled", "steering"]:
-        from vllm import LLM
+    mode = args.mode
+    enable_steering = mode != "disabled"
 
-        enable_steering = mode != "disabled"
+    print(f"\n[{mode}] Loading model (enable_steering={enable_steering})...", flush=True)
+    llm = LLM(
+        model=args.model,
+        enable_steering=enable_steering,
+        max_steering_configs=4,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=2048,
+    )
 
-        print(f"\n[{mode}] Loading model (enable_steering={enable_steering})...", flush=True)
-        llm = LLM(
-            model=args.model,
-            enable_steering=enable_steering,
-            max_steering_configs=4,
-            gpu_memory_utilization=0.9,
-            max_model_len=2048,
-        )
+    sp_list = build_sp_list(
+        mode=mode,
+        batch_size=args.batch_size,
+        max_tokens=args.max_tokens,
+        hidden_size=model_config["hidden_size"],
+        num_layers=model_config["num_layers"],
+    )
 
-        sp_list = build_sp_list(
-            mode=mode,
-            batch_size=args.batch_size,
-            max_tokens=args.max_tokens,
-            hidden_size=model_config["hidden_size"],
-            num_layers=model_config["num_layers"],
-        )
+    data = profile_mode(
+        llm=llm,
+        mode=mode,
+        prompts=prompts,
+        sp_list=sp_list,
+        warmup=args.warmup,
+        iters=args.iters,
+        output_dir=output_dir,
+    )
 
-        summary[mode] = profile_mode(
-            llm=llm,
-            mode=mode,
-            prompts=prompts,
-            sp_list=sp_list,
-            warmup=args.warmup,
-            iters=args.iters,
-            output_dir=output_dir,
-        )
-
-        del llm
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    # Final summary
     print(f"\n{'=' * 70}")
-    print("  Final Summary")
+    print(f"  Summary ({mode})")
     print(f"{'=' * 70}")
-    print(f"{'mode':<12} {'cpu_ms':>12} {'cuda_ms':>12} {'num_events':>12}")
-    print(f"{'-' * 70}")
-    for mode, data in summary.items():
-        print(
-            f"{mode:<12} {data['cpu_total_ms']:>12.1f} "
-            f"{data['cuda_total_ms']:>12.1f} {data['num_events']:>12}"
-        )
+    print(f"  cpu_total:  {data['cpu_total_ms']:.1f} ms")
+    print(f"  cuda_total: {data['cuda_total_ms']:.1f} ms")
+    print(f"  num_events: {data['num_events']}")
+    print(f"  trace:      {data['trace_path']}")
     print(f"{'=' * 70}")
-
-    if "disabled" in summary and "steering" in summary:
-        d = summary["disabled"]
-        s = summary["steering"]
-        cpu_delta = s["cpu_total_ms"] - d["cpu_total_ms"]
-        cuda_delta = s["cuda_total_ms"] - d["cuda_total_ms"]
-        print(f"\n  Steering overhead:")
-        print(f"    CPU delta:  {cpu_delta:+.1f} ms")
-        print(f"    CUDA delta: {cuda_delta:+.1f} ms")
-        if d["cuda_total_ms"] > 0:
-            print(
-                f"    CUDA relative: {cuda_delta / d['cuda_total_ms'] * 100:+.1f}% "
-                f"(over {args.iters} iters)"
-            )
-
-    print(f"\nOpen Chrome traces at chrome://tracing or https://ui.perfetto.dev")
-    print(f"Traces saved to: {output_dir}")
+    print(
+        f"\nRun the other mode next to compare. "
+        f"Open Chrome traces at chrome://tracing or https://ui.perfetto.dev"
+    )
 
 
 if __name__ == "__main__":
