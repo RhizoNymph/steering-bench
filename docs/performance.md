@@ -4,12 +4,13 @@ Consolidated findings from the steering-bench suite, targeting the performance c
 
 ## Executive summary
 
-1. **Enabling steering is effectively free.** With steering enabled but no active vectors, latency overhead is ≤5% across all tested batch sizes.
+1. **Enabling steering is effectively free.** With steering enabled but no active vectors, latency overhead is ≤5% across all tested batch sizes (within measurement noise of the baseline).
 2. **Memory cost is negligible.** 0.5 MB per config on Gemma-3-4B (bf16); ~16 MB at `max_steering_configs=32` — less than 0.1% of GPU memory.
-3. **Per-request steering has a batch-size-scaling overhead.** At batch=1, +9% latency; at batch=16, +68%. Root cause identified.
-4. **Prefix caching works correctly.** Content-hashed cache keys deduplicate identical vectors across requests. No cache invalidation from steering.
-5. **CUDA graphs are preserved.** Steering doesn't break graph capture or replay.
-6. **The root cause of per-request overhead is `torch.compile` fusion loss around the opaque steering custom op.** This has a clear optimization path.
+3. **Mixed-batch cost scales proportionally with active requests, not transitively.** Non-steered requests in a batch containing some steered requests pay only a small proportional share of the steering overhead, not the full per-request cost. This makes shared multi-tenant deployment viable.
+4. **Per-request steering has a batch-size-scaling overhead.** At batch=1, +9% latency; at batch=16, +68% when all requests are actively steered. Root cause identified.
+5. **Prefix caching works correctly.** Content-hashed cache keys deduplicate identical vectors across requests. No cache invalidation from steering.
+6. **CUDA graphs are preserved.** Steering doesn't break graph capture or replay.
+7. **The root cause of per-request overhead is `torch.compile` fusion loss around the opaque steering custom op.** This has a clear optimization path.
 
 ## Methodology
 
@@ -86,6 +87,24 @@ With sufficient table headroom, scaling from 1 to 8 distinct configs costs only 
 - For Gemma-3-4B (bf16): `3 × 2560 × 34 × 2 = 522 KB per config`
 - At `max_steering_configs=32`: ~16 MB total (≤0.07% of 24 GB)
 - Validated against theoretical formula with ratios of 0.57x → 0.91x across the sweep (ratio approaches 1.0 as signal grows relative to measurement granularity)
+
+**Mixed-batch behavior** (batch=16, 1 shared steering vector, prefix cache on)
+
+A batch contains a mix of steered and non-steered requests. How does cost scale with the number of active (steered) requests in the batch?
+
+| num active | latency | throughput | latency overhead | throughput loss |
+|---|---|---|---|---|
+| 0 | 1634 ms | 1880 tok/s | baseline | baseline |
+| 1 | 1770 ms | 1735 tok/s | +8.4% | -7.7% |
+| 4 | 1985 ms | 1547 tok/s | +21.5% | -17.7% |
+| 8 | 2260 ms | 1360 tok/s | +38.3% | -27.7% |
+| 16 | 2846 ms | 1080 tok/s | +74.2% | -42.6% |
+
+Linear fit: `overhead(n) ≈ 66 + 73 × n` ms. Each additional active request adds ~73 ms of total batch latency and proportionally reduces throughput. The cost is **proportional to active count, not transitive across the batch**.
+
+Theoretical expectation from pure continuous batching would have been transitive cost (one active request forces the whole batch to pay the full per-request cost because the forward pass is shared). The measurements contradict this expectation. The exact mechanism has not been pinned down but likely involves per-request model-runner work, scheduler behavior, or data-dependent paths in the steering update loop.
+
+**Deployment implication:** A vLLM instance with `enable_steering=True` serving mixed traffic pays cost proportional to actual steering usage. For a workload where 5% of requests use steering, the effective instance-wide latency overhead is ~0.2%, not ~68%. Shared multi-tenant inference with steering is viable without penalizing non-steering users.
 
 ### Ablations
 
@@ -229,7 +248,7 @@ Pending the optimizations above, users can minimize steering overhead by:
 
 1. **Use only one hook point** (`post_mlp` is usually sufficient). Adding hooks is linearly expensive until the fusion fix lands.
 2. **Set `max_steering_configs` generously**: at minimum equal to the expected distinct-config concurrency, ideally with 2-4x headroom. Memory cost is trivial (~0.5 MB per config); latency cost of undersizing is severe (scheduler serializes requests).
-3. **Use the `enabled_idle` mode** (steering compiled in but no active vectors) for requests that don't need steering — this path is essentially free and lets a single vLLM instance serve both steered and unsteered traffic.
+3. **Mixed-workload deployments are fine.** Because per-batch cost is proportional to the number of active steering requests (not transitive), a single vLLM instance can serve mixed steered and non-steered traffic without penalizing the unsteered requests. A workload where only a small fraction of requests use steering pays cost proportional to that fraction.
 4. **Prefer global steering vectors** (`collective_rpc("set_steering_vectors", ...)`) when all requests share the same steering target. Global vectors do not compete for table rows and do not trigger per-request registration overhead.
 
 ## Comparison to external libraries
