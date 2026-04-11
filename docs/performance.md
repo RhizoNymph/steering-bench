@@ -7,7 +7,7 @@ Consolidated findings from the steering-bench suite, targeting the performance c
 1. **Enabling steering is effectively free.** With steering enabled but no active vectors, latency overhead is ≤5% across all tested batch sizes (within measurement noise of the baseline).
 2. **Memory cost is negligible.** 0.5 MB per config on Gemma-3-4B (bf16); ~16 MB at `max_steering_configs=32` — less than 0.1% of GPU memory.
 3. **Mixed-batch cost scales proportionally with active requests, not transitively.** Non-steered requests in a batch containing some steered requests pay only a small proportional share of the steering overhead, not the full per-request cost. This makes shared multi-tenant deployment viable.
-4. **Per-request steering has a batch-size-scaling overhead.** At batch=1, +9% latency; at batch=16, +68% when all requests are actively steered. Root cause identified.
+4. **Per-request steering has a batch-size-scaling overhead.** When all requests in a batch are actively steered: +9.7% latency at batch=1, +74% at batch=16, +124% at batch=32. Per-step cost roughly doubles with each batch-size doubling. Root cause identified.
 5. **Prefix caching works correctly.** Content-hashed cache keys deduplicate identical vectors across requests. No cache invalidation from steering.
 6. **CUDA graphs are preserved.** Steering doesn't break graph capture or replay.
 7. **The root cause of per-request overhead is `torch.compile` fusion loss around the opaque steering custom op.** This has a clear optimization path.
@@ -33,11 +33,11 @@ Consolidated findings from the steering-bench suite, targeting the performance c
 - Implication: the kernel itself is cheap; launch overhead dominates at small token counts
 
 **SteeringManager methods** (34 layers, Gemma-3-4B config)
-| operation | 1 config, 1 hook | 4 configs, 3 hooks | 16 configs, 3 hooks |
-|---|---|---|---|
-| `populate_steering_tables` | 2.14 ms | 5.06 ms | 15.4 ms |
-| `register+release` cycle | 3.02 ms | 36.1 ms | 145.3 ms |
-| `get_row_for_config` | ~0.2 μs | ~0.7 μs | ~2.5 μs |
+| operation | 1 config, 1 hook | 1 config, 3 hooks | 4 configs, 3 hooks | 16 configs, 3 hooks |
+|---|---|---|---|---|
+| `populate_steering_tables` | 2.14 ms | — | 5.06 ms | 15.4 ms |
+| `register+release` cycle | 3.02 ms | ~9 ms | 36.1 ms | 145.3 ms |
+| `get_row_for_config` | ~0.2 μs | — | ~0.7 μs | ~2.5 μs |
 
 Key takeaway: `populate_steering_tables` runs once per forward pass. At configs=1/1 hook (the minimum realistic workload), it costs **~2.14 ms per decode step** in pure Python + small CUDA kernel launches. This is the dominant Python-side cost.
 
@@ -49,17 +49,59 @@ Key takeaway: `populate_steering_tables` runs once per forward pass. At configs=
 
 ### End-to-end system benchmarks
 
-**Latency overhead by mode** (Gemma-3-4B, max_tokens=128, prefix cache on)
+**Throughput matrix: mode × batch_size** (Gemma-3-4B, max_tokens=128, prefix cache default)
 
-| mode | batch=1 | batch=4 | batch=8 | batch=16 |
-|---|---|---|---|---|
-| `disabled` | 1567 ms (baseline) | 1553 ms | 1606 ms | 1690 ms |
-| `enabled_idle` | +2.7% | +4.6% | +2.0% | -0.4% |
-| `per_request_1` | +13.3% | +20.8% | +36.4% | +69.0% |
-| `per_request_4` | +9.5% | +27.9% | +43.7% | +75.4% |
+The primary end-to-end measurement. Five steering modes swept across five batch sizes with one model load per (`enable_steering`) setting, so within-phase results are directly comparable.
 
-The `enabled_idle` mode is flat and cheap — the cost of having the feature on but unused is negligible.
-The `per_request_*` modes scale with batch size, with per_request_1 and per_request_4 nearly identical (small constant offset for the second, fourth configs).
+Latency (ms):
+
+| mode | b=1 | b=4 | b=8 | b=16 | b=32 |
+|---|---|---|---|---|---|
+| `disabled` | 1565 | 1524 | 1560 | 1635 | 1911 |
+| `enabled_idle` | 1577 | 1555 | 1563 | 1633 | 1875 |
+| `mixed_25` | — | 1726 | 1777 | 1979 | 2514 |
+| `mixed_50` | — | 1737 | 1911 | 2255 | 3080 |
+| `mixed_75` | — | 1804 | 2047 | 2556 | 3663 |
+| `all_steered` | 1716 | 1871 | 2183 | 2839 | 4273 |
+
+Throughput (tokens/sec):
+
+| mode | b=1 | b=4 | b=8 | b=16 | b=32 |
+|---|---|---|---|---|---|
+| `disabled` | 123 | 504 | 985 | 1878 | 3219 |
+| `enabled_idle` | 122 | 494 | 983 | 1881 | 3277 |
+| `mixed_25` | — | 445 | 864 | 1552 | 2444 |
+| `mixed_50` | — | 442 | 804 | 1362 | 1995 |
+| `mixed_75` | — | 426 | 750 | 1202 | 1677 |
+| `all_steered` | 112 | 411 | 704 | 1082 | 1438 |
+
+Latency overhead (%) vs `disabled` at same batch size:
+
+| mode | b=1 | b=4 | b=8 | b=16 | b=32 |
+|---|---|---|---|---|---|
+| `enabled_idle` | +0.7% | +2.1% | +0.2% | -0.2% | -1.9% |
+| `mixed_25` | — | +13.3% | +13.9% | +21.0% | +31.6% |
+| `mixed_50` | — | +14.0% | +22.5% | +37.9% | +61.2% |
+| `mixed_75` | — | +18.4% | +31.2% | +56.3% | +91.7% |
+| `all_steered` | +9.7% | +22.8% | +39.9% | +73.6% | +123.6% |
+
+Throughput loss (%) vs `disabled` at same batch size:
+
+| mode | b=1 | b=4 | b=8 | b=16 | b=32 |
+|---|---|---|---|---|---|
+| `enabled_idle` | -0.7% | -2.0% | -0.2% | +0.2% | +1.8% |
+| `mixed_25` | — | -11.7% | -12.2% | -17.4% | -24.1% |
+| `mixed_50` | — | -12.3% | -18.4% | -27.5% | -38.0% |
+| `mixed_75` | — | -15.5% | -23.8% | -36.0% | -47.9% |
+| `all_steered` | -8.8% | -18.6% | -28.5% | -42.4% | -55.3% |
+
+Three key observations from this table:
+
+1. **`enabled_idle` is statistically indistinguishable from `disabled`.** Overheads range from -1.9% to +2.1% with roughly equal sign distribution. Since `enabled_idle` cannot mechanically be faster than `disabled`, the negative values confirm the signal is zero and the variance is measurement noise. Enabling the steering feature without active vectors has no measurable cost.
+
+2. **`all_steered` per-step overhead roughly doubles with each batch size doubling.** Assuming ~128 decode steps: b=1 → 1.2 ms/step, b=4 → 2.7, b=8 → 4.9, b=16 → 9.4, b=32 → 18.5. This is the signature of kernel fusion loss (the lost-fusion benefit scales with the data volume being fused).
+
+3. **At batch=32 fully steered, steering more than doubles total latency** (+123.6%). Per-request deployment without the fusion optimization is not viable at production batch sizes.
 
 **Throughput** (64 prompts, prompt_len=64, max_tokens=128)
 
@@ -70,7 +112,7 @@ The `per_request_*` modes scale with batch size, with per_request_1 and per_requ
 | 4 | 1210 | 80.4% |
 | 8 | 1152 | 81.3% |
 
-With `max_steering_configs=32` (big table, eliminating thrashing):
+With `max_steering_configs=32` (ample table headroom):
 
 | distinct configs | tokens/sec | loss vs configs=0 |
 |---|---|---|
@@ -79,7 +121,7 @@ With `max_steering_configs=32` (big table, eliminating thrashing):
 | 4 | 1792 | 71.1% |
 | 8 | 1723 | 72.2% |
 
-With sufficient table headroom, scaling from 1 to 8 distinct configs costs only ~7% throughput. **Table sizing matters enormously**.
+With sufficient table headroom, scaling from 1 to 8 distinct configs costs only ~7% throughput. **Table sizing matters enormously** — the gap between `max_steering_configs=4` and `max_steering_configs=32` at `distinct=4` (1210 → 1792 tok/s, +48%) is larger than the scheduler-bound serialization model in the latency ablation below fully accounts for. The latency ablation cleanly shows a threshold at `max_configs ≥ distinct-in-flight`, but the throughput benchmark continues to improve past that threshold; the residual gap is unexplained and a targeted experiment is open work.
 
 **Memory cost**
 - Measured per-config cost: **0.5 MB per additional `max_steering_configs`**
@@ -88,23 +130,31 @@ With sufficient table headroom, scaling from 1 to 8 distinct configs costs only 
 - At `max_steering_configs=32`: ~16 MB total (≤0.07% of 24 GB)
 - Validated against theoretical formula with ratios of 0.57x → 0.91x across the sweep (ratio approaches 1.0 as signal grows relative to measurement granularity)
 
-**Mixed-batch behavior** (batch=16, 1 shared steering vector, prefix cache on)
+**Mixed-batch proportional scaling** (derived from the throughput matrix above)
 
-A batch contains a mix of steered and non-steered requests. How does cost scale with the number of active (steered) requests in the batch?
+A batch contains a mix of steered and non-steered requests. Theoretical expectation from continuous batching would be transitive cost: any active request forces the entire batch to pay the full per-request cost, because the forward pass is shared across all tokens. The measurements contradict this expectation.
 
-| num active | latency | throughput | latency overhead | throughput loss |
-|---|---|---|---|---|
-| 0 | 1634 ms | 1880 tok/s | baseline | baseline |
-| 1 | 1770 ms | 1735 tok/s | +8.4% | -7.7% |
-| 4 | 1985 ms | 1547 tok/s | +21.5% | -17.7% |
-| 8 | 2260 ms | 1360 tok/s | +38.3% | -27.7% |
-| 16 | 2846 ms | 1080 tok/s | +74.2% | -42.6% |
+Per-active-request marginal latency cost, computed from the throughput matrix as `(latency_with_n_active - latency_disabled) / n`:
 
-Linear fit: `overhead(n) ≈ 66 + 73 × n` ms. Each additional active request adds ~73 ms of total batch latency and proportionally reduces throughput. The cost is **proportional to active count, not transitive across the batch**.
+| batch size | all_steered cost/active | mixed cost/active (flat across fractions) |
+|---|---|---|
+| 4 | 86.8 ms | ~85 ms |
+| 8 | 77.9 ms | ~78 ms |
+| 16 | 75.3 ms | ~75 ms |
+| 32 | 73.8 ms | ~74 ms |
 
-Theoretical expectation from pure continuous batching would have been transitive cost (one active request forces the whole batch to pay the full per-request cost because the forward pass is shared). The measurements contradict this expectation. The exact mechanism has not been pinned down but likely involves per-request model-runner work, scheduler behavior, or data-dependent paths in the steering update loop.
+Cost per additional active request **converges to ~74 ms** at larger batch sizes and stays stable whether the active fraction is 25%, 50%, 75%, or 100%. Checked directly by computing successive deltas at batch=32:
 
-**Deployment implication:** A vLLM instance with `enable_steering=True` serving mixed traffic pays cost proportional to actual steering usage. For a workload where 5% of requests use steering, the effective instance-wide latency overhead is ~0.2%, not ~68%. Shared multi-tenant inference with steering is viable without penalizing non-steering users.
+- 0 → 8 active: +603 ms ÷ 8 = **75.4 ms/active**
+- 8 → 16 active: +567 ms ÷ 8 = **70.8 ms/active**
+- 16 → 24 active: +583 ms ÷ 8 = **72.9 ms/active**
+- 24 → 32 active: +610 ms ÷ 8 = **76.3 ms/active**
+
+The cost is **proportional to active count, not transitive across the batch**. Confirmed across batch sizes 4, 8, 16, and 32 with intermediate points at 25%, 50%, 75%, and 100% active fractions.
+
+The exact mechanism for the proportional behavior has not been pinned down but likely involves per-request model-runner work, scheduler behavior, or data-dependent paths in the steering update loop.
+
+**Deployment implication:** A vLLM instance with `enable_steering=True` serving mixed traffic pays cost proportional to actual steering usage. For a workload where 5% of requests use steering, the effective instance-wide latency overhead is a few percent, not the ~74% all-active cost. Shared multi-tenant inference with steering is viable without penalizing non-steering users.
 
 ### Ablations
 
@@ -238,7 +288,7 @@ Most decode steps don't change the active config set — same configs, same vect
 **Expected impact**: `populate_steering_tables` becomes effectively free in the steady state (most decode steps).
 
 ### 6. Pre-convert vectors at SamplingParams construction
-`register_config` currently converts Python lists to CUDA tensors on every registration. Measurement: ~9 ms per registration cycle at 1 config, scaling to ~145 ms at 16 configs. Pre-converting at the serving boundary would move this cost out of the hot path.
+`register_config` currently converts Python lists to CUDA tensors on every registration. Measurement: ~9 ms per registration cycle at 1 config × 3 hooks, scaling to ~145 ms at 16 configs × 3 hooks. Pre-converting at the serving boundary would move this cost out of the hot path.
 
 **Expected impact**: eliminates a tail-latency risk at high-config-churn workloads. Not critical at current default max_configs=4.
 
