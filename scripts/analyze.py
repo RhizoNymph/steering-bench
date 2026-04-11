@@ -181,11 +181,112 @@ def plot_throughput_by_configs(df: pd.DataFrame, output_dir: Path, fmt: str) -> 
     _save(fig, output_dir / f"throughput_by_configs.{fmt}", f"throughput_by_configs.{fmt}")
 
 
-# ── Throughput matrix (mode × batch) ──────────────────────────────────────────
+# ── Throughput matrix (mode × batch) — 4 plots covering both latency & throughput
+
+
+def _matrix_cell_value(data: pd.DataFrame, mode: str, bs, metric: str) -> float | None:
+    """Get a single value from the throughput matrix dataset.
+
+    metric: one of "latency" (mean_ms) or "throughput" (mean_tps)
+    """
+    row = data[(data["param_mode"] == mode) & (data["param_batch_size"] == bs)]
+    if row.empty:
+        return None
+    r = row.iloc[0]
+    if metric == "latency":
+        return r.get("result_latency_ms_mean_ms")
+    if metric == "throughput":
+        return _tps_field(r)
+    return None
+
+
+def _grouped_bars(
+    data: pd.DataFrame,
+    modes_present: list[str],
+    batch_sizes: list,
+    metric: str,
+    ylabel: str,
+    title: str,
+    output_path: Path,
+    name: str,
+) -> None:
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x = np.arange(len(batch_sizes))
+    width = 0.8 / max(1, len(modes_present))
+    offsets = np.arange(len(modes_present)) - (len(modes_present) - 1) / 2
+
+    for i, mode in enumerate(modes_present):
+        vals = [_matrix_cell_value(data, mode, bs, metric) or 0 for bs in batch_sizes]
+        ax.bar(
+            x + offsets[i] * width,
+            vals,
+            width,
+            label=mode,
+            color=COLORS.get(mode, "#666"),
+        )
+
+    ax.set_xlabel("Batch Size")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(int(b)) for b in batch_sizes])
+    ax.legend(loc="upper left")
+    _save(fig, output_path, name)
+
+
+def _loss_heatmap(
+    data: pd.DataFrame,
+    modes_present: list[str],
+    batch_sizes: list,
+    metric: str,
+    label: str,
+    title: str,
+    output_path: Path,
+    name: str,
+) -> None:
+    """Heatmap of percentage delta vs disabled (positive = cost)."""
+    matrix = np.full((len(modes_present), len(batch_sizes)), np.nan)
+    for i, mode in enumerate(modes_present):
+        for j, bs in enumerate(batch_sizes):
+            mode_val = _matrix_cell_value(data, mode, bs, metric)
+            base_val = _matrix_cell_value(data, "disabled", bs, metric)
+            if mode_val is None or base_val is None or base_val <= 0:
+                continue
+            if metric == "latency":
+                # Overhead % (higher = worse)
+                matrix[i, j] = (mode_val - base_val) / base_val * 100
+            else:
+                # Throughput loss % (higher = worse)
+                matrix[i, j] = (base_val - mode_val) / base_val * 100
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    vmax = max(100, np.nanmax(matrix)) if not np.isnan(matrix).all() else 100
+    im = ax.imshow(matrix, cmap="YlOrRd", aspect="auto", vmin=0, vmax=vmax)
+    ax.set_xticks(range(len(batch_sizes)))
+    ax.set_xticklabels([str(int(b)) for b in batch_sizes])
+    ax.set_yticks(range(len(modes_present)))
+    ax.set_yticklabels(modes_present)
+    ax.set_xlabel("Batch Size")
+    ax.set_title(title)
+    for i in range(len(modes_present)):
+        for j in range(len(batch_sizes)):
+            if not np.isnan(matrix[i, j]):
+                threshold = vmax * 0.5
+                ax.text(
+                    j,
+                    i,
+                    f"{matrix[i, j]:+.0f}%",
+                    ha="center",
+                    va="center",
+                    fontsize=10,
+                    color="black" if matrix[i, j] < threshold else "white",
+                )
+    fig.colorbar(im, label=label)
+    _save(fig, output_path, name)
 
 
 def plot_throughput_matrix(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
-    """Throughput matrix benchmark: mode x batch_size grouped bars + heatmap."""
+    """Throughput matrix benchmark: 4 plots covering latency and throughput."""
     data = df[df["benchmark"] == "vllm.throughput_matrix"].copy()
     if data.empty:
         return
@@ -202,71 +303,55 @@ def plot_throughput_matrix(df: pd.DataFrame, output_dir: Path, fmt: str) -> None
     if not batch_sizes:
         return
 
-    # Grouped bar chart
-    fig, ax = plt.subplots(figsize=(12, 6))
-    x = np.arange(len(batch_sizes))
     modes_present = [m for m in mode_order if not data[data["param_mode"] == m].empty]
-    width = 0.8 / max(1, len(modes_present))
-    offsets = np.arange(len(modes_present)) - (len(modes_present) - 1) / 2
 
-    for i, mode in enumerate(modes_present):
-        mode_data = data[data["param_mode"] == mode]
-        tps_vals = []
-        for bs in batch_sizes:
-            row = mode_data[mode_data["param_batch_size"] == bs]
-            tps_vals.append(_tps_field(row.iloc[0]) if not row.empty else 0)
-        ax.bar(
-            x + offsets[i] * width,
-            tps_vals,
-            width,
-            label=mode,
-            color=COLORS.get(mode, "#666"),
-        )
+    # 1. Throughput grouped bars
+    _grouped_bars(
+        data,
+        modes_present,
+        batch_sizes,
+        metric="throughput",
+        ylabel="Throughput (tokens/sec)",
+        title="Throughput matrix: mode × batch_size",
+        output_path=output_dir / f"matrix_throughput_bars.{fmt}",
+        name=f"matrix_throughput_bars.{fmt}",
+    )
 
-    ax.set_xlabel("Batch Size")
-    ax.set_ylabel("Throughput (tokens/sec)")
-    ax.set_title("Throughput matrix: mode × batch_size")
-    ax.set_xticks(x)
-    ax.set_xticklabels([str(int(b)) for b in batch_sizes])
-    ax.legend(loc="upper left")
-    _save(fig, output_dir / f"throughput_matrix_bars.{fmt}", f"throughput_matrix_bars.{fmt}")
+    # 2. Throughput loss heatmap
+    _loss_heatmap(
+        data,
+        modes_present,
+        batch_sizes,
+        metric="throughput",
+        label="throughput loss (%)",
+        title="Throughput loss (%) vs disabled",
+        output_path=output_dir / f"matrix_throughput_heatmap.{fmt}",
+        name=f"matrix_throughput_heatmap.{fmt}",
+    )
 
-    # Loss-vs-disabled heatmap
-    matrix = np.full((len(modes_present), len(batch_sizes)), np.nan)
-    for i, mode in enumerate(modes_present):
-        for j, bs in enumerate(batch_sizes):
-            mode_row = data[(data["param_mode"] == mode) & (data["param_batch_size"] == bs)]
-            base_row = data[(data["param_mode"] == "disabled") & (data["param_batch_size"] == bs)]
-            if mode_row.empty or base_row.empty:
-                continue
-            mode_tps = _tps_field(mode_row.iloc[0])
-            base_tps = _tps_field(base_row.iloc[0])
-            if mode_tps is None or base_tps is None or base_tps <= 0:
-                continue
-            matrix[i, j] = (base_tps - mode_tps) / base_tps * 100  # % loss
+    # 3. Latency grouped bars
+    _grouped_bars(
+        data,
+        modes_present,
+        batch_sizes,
+        metric="latency",
+        ylabel="Latency (ms)",
+        title="Latency matrix: mode × batch_size",
+        output_path=output_dir / f"matrix_latency_bars.{fmt}",
+        name=f"matrix_latency_bars.{fmt}",
+    )
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    im = ax.imshow(matrix, cmap="YlOrRd", aspect="auto", vmin=0)
-    ax.set_xticks(range(len(batch_sizes)))
-    ax.set_xticklabels([str(int(b)) for b in batch_sizes])
-    ax.set_yticks(range(len(modes_present)))
-    ax.set_yticklabels(modes_present)
-    ax.set_xlabel("Batch Size")
-    ax.set_title("Throughput loss (%) vs disabled")
-    for i in range(len(modes_present)):
-        for j in range(len(batch_sizes)):
-            if not np.isnan(matrix[i, j]):
-                ax.text(
-                    j,
-                    i,
-                    f"{matrix[i, j]:.0f}%",
-                    ha="center",
-                    va="center",
-                    fontsize=10,
-                    color="black" if matrix[i, j] < 50 else "white",
-                )
-    fig.colorbar(im, label="throughput loss (%)")
-    _save(fig, output_dir / f"throughput_matrix_heatmap.{fmt}", f"throughput_matrix_heatmap.{fmt}")
+    # 4. Latency overhead heatmap
+    _loss_heatmap(
+        data,
+        modes_present,
+        batch_sizes,
+        metric="latency",
+        label="latency overhead (%)",
+        title="Latency overhead (%) vs disabled",
+        output_path=output_dir / f"matrix_latency_heatmap.{fmt}",
+        name=f"matrix_latency_heatmap.{fmt}",
+    )
 
 
 # ── Mixed batch (proportional scaling) ────────────────────────────────────────
