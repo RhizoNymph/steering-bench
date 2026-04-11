@@ -105,20 +105,46 @@ def run_mixed(
         llm.generate(prompts, sp_list)
 
     # Measure
-    samples = []
+    samples_ms = []
+    total_output_tokens_per_iter = []
     for _ in range(iters):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        llm.generate(prompts, sp_list)
+        outputs = llm.generate(prompts, sp_list)
         torch.cuda.synchronize()
         t1 = time.perf_counter()
-        samples.append((t1 - t0) * 1000.0)
+        samples_ms.append((t1 - t0) * 1000.0)
+        total_output_tokens_per_iter.append(
+            sum(len(o.outputs[0].token_ids) for o in outputs)
+        )
 
     del llm
     gc.collect()
     torch.cuda.empty_cache()
 
-    return compute_stats(samples).to_dict()
+    latency_stats = compute_stats(samples_ms).to_dict()
+
+    # Throughput computation
+    avg_output_tokens = (
+        sum(total_output_tokens_per_iter) / len(total_output_tokens_per_iter)
+        if total_output_tokens_per_iter
+        else 0
+    )
+    total_tokens_per_iter = batch_size * prompt_len + avg_output_tokens
+    throughput_samples = [
+        total_tokens_per_iter / (ms / 1000.0) for ms in samples_ms
+    ]
+    throughput_stats = {
+        k.replace("_ms", "_tps"): v
+        for k, v in compute_stats(throughput_samples).to_dict().items()
+        if k != "samples_ms"
+    }
+
+    return {
+        "latency": latency_stats,
+        "throughput": throughput_stats,
+        "avg_output_tokens_total": avg_output_tokens,
+    }
 
 
 def main():
@@ -147,14 +173,19 @@ def main():
     print()
 
     all_results = []
-    baseline_none = None
+    baseline_latency = None
+    baseline_tps = None
 
     for num_active in active_counts:
         label = labels.get(num_active, f"{num_active}_active")
         print(f"--- {label} ({num_active}/{bs} active) ---")
 
+        result = None
+        latency_overhead_pct = None
+        throughput_loss_pct = None
+
         try:
-            stats = run_mixed(
+            result = run_mixed(
                 model=args.model,
                 batch_size=bs,
                 num_active=num_active,
@@ -165,20 +196,31 @@ def main():
                 hidden_size=model_config["hidden_size"],
                 num_layers=model_config["num_layers"],
             )
-            mean = stats["mean_ms"]
-            p90 = stats["p90_ms"]
+            mean_ms = result["latency"]["mean_ms"]
+            p90_ms = result["latency"]["p90_ms"]
+            mean_tps = result["throughput"]["mean_tps"]
+
             if num_active == 0:
-                baseline_none = mean
-            delta_pct = None
-            if baseline_none and baseline_none > 0:
-                delta_pct = (mean - baseline_none) / baseline_none * 100
-            delta_str = f"{delta_pct:+.1f}%" if delta_pct is not None else "baseline"
-            print(f"    mean={mean:.1f}ms p90={p90:.1f}ms overhead={delta_str}")
+                baseline_latency = mean_ms
+                baseline_tps = mean_tps
+
+            if baseline_latency and baseline_latency > 0:
+                latency_overhead_pct = (mean_ms - baseline_latency) / baseline_latency * 100
+            if baseline_tps and baseline_tps > 0:
+                throughput_loss_pct = (baseline_tps - mean_tps) / baseline_tps * 100
+
+            print(
+                f"    mean={mean_ms:.1f}ms p90={p90_ms:.1f}ms  "
+                f"throughput={mean_tps:.0f} tok/s  "
+                f"lat_overhead={latency_overhead_pct:+.1f}% "
+                f"tps_loss={throughput_loss_pct:+.1f}%"
+                if latency_overhead_pct is not None
+                else f"    mean={mean_ms:.1f}ms throughput={mean_tps:.0f} tok/s (baseline)"
+            )
 
         except torch.cuda.OutOfMemoryError:
             print(f"    OOM!")
-            stats = {"error": "OOM"}
-            delta_pct = None
+            result = {"error": "OOM"}
 
         params = {
             "model": args.model,
@@ -188,11 +230,19 @@ def main():
             "prompt_len": args.prompt_len,
             "max_tokens": args.max_tokens,
         }
-        results_out = {
-            "latency_ms": {k: v for k, v in stats.items() if k != "samples_ms"},
-        }
-        if delta_pct is not None:
-            results_out["overhead_vs_none_active_pct"] = delta_pct
+        results_out: dict = {}
+        if result and "error" not in result:
+            results_out["latency_ms"] = {
+                k: v for k, v in result["latency"].items() if k != "samples_ms"
+            }
+            results_out["throughput_tokens_per_sec"] = result["throughput"]
+            results_out["avg_output_tokens_total"] = result["avg_output_tokens_total"]
+        else:
+            results_out["error"] = "OOM"
+        if latency_overhead_pct is not None:
+            results_out["latency_overhead_pct"] = latency_overhead_pct
+        if throughput_loss_pct is not None:
+            results_out["throughput_loss_pct"] = throughput_loss_pct
 
         write_result(
             benchmark="vllm.mixed_batch",
@@ -200,38 +250,50 @@ def main():
             results=results_out,
             output_dir=args.output_dir,
             tag=args.tag,
-            raw_samples_ms=stats.get("samples_ms"),
+            raw_samples_ms=result["latency"].get("samples_ms") if result and "error" not in result else None,
         )
         all_results.append({
             "label": label,
             "num_active": num_active,
-            "stats": stats,
-            "overhead_pct": delta_pct,
+            "result": result,
+            "latency_overhead_pct": latency_overhead_pct,
+            "throughput_loss_pct": throughput_loss_pct,
         })
 
-    print(f"\n{'=' * 80}")
-    print(f"  Mixed-Batch Summary (batch={bs}, Gemma-3-4B)")
-    print(f"{'=' * 80}")
-    print(f"{'mode':<16} {'active':>10} {'mean_ms':>10} {'p90_ms':>10} {'overhead':>12}")
-    print(f"{'-' * 80}")
+    print(f"\n{'=' * 100}")
+    print(f"  Mixed-Batch Summary (batch={bs}, {args.model})")
+    print(f"{'=' * 100}")
+    print(
+        f"{'mode':<16} {'active':>10} {'mean_ms':>10} {'p90_ms':>10} "
+        f"{'tok/sec':>12} {'lat_over':>12} {'tps_loss':>12}"
+    )
+    print(f"{'-' * 100}")
     for r in all_results:
-        s = r["stats"]
-        if "error" in s:
+        result = r["result"]
+        if not result or "error" in result:
             print(f"{r['label']:<16} {r['num_active']:>10} {'OOM':>10}")
             continue
-        overhead = r["overhead_pct"]
-        overhead_str = f"{overhead:+.1f}%" if overhead is not None else "baseline"
+        lat = result["latency"]
+        tps = result["throughput"]["mean_tps"]
+        lat_over = r["latency_overhead_pct"]
+        tps_loss = r["throughput_loss_pct"]
+        lat_over_str = f"{lat_over:+.1f}%" if lat_over is not None else "baseline"
+        tps_loss_str = f"{tps_loss:+.1f}%" if tps_loss is not None else "baseline"
         print(
             f"{r['label']:<16} {r['num_active']:>10} "
-            f"{s['mean_ms']:>10.1f} {s['p90_ms']:>10.1f} {overhead_str:>12}"
+            f"{lat['mean_ms']:>10.1f} {lat['p90_ms']:>10.1f} "
+            f"{tps:>12.0f} {lat_over_str:>12} {tps_loss_str:>12}"
         )
-    print(f"{'=' * 80}")
+    print(f"{'=' * 100}")
     print(
         "\nInterpretation:\n"
-        "  - If 'one_active' is close to 'all_active', the cost is TRANSITIVE:\n"
-        "    any active request in a batch forces the full per-request cost on everyone.\n"
-        "  - If 'one_active' scales with active count toward 'all_active',\n"
-        "    the cost is PROPORTIONAL to the number of steered requests.\n"
+        "  - If 'one_active' latency/throughput is close to 'all_active', the cost is\n"
+        "    TRANSITIVE: any active request forces the full per-request cost on the\n"
+        "    entire batch, including non-steered requests sharing the step.\n"
+        "  - If 'one_active' scales with active count toward 'all_active', the cost\n"
+        "    is PROPORTIONAL to the number of steered requests.\n"
+        "  - In vLLM's continuous batching, the theoretical expectation is TRANSITIVE\n"
+        "    cost because the forward pass is shared across all tokens in a step.\n"
     )
 
 
