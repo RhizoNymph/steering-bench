@@ -4,13 +4,13 @@ Consolidated findings from the steering-bench suite, targeting the performance c
 
 ## Executive summary
 
-1. **Enabling steering is effectively free.** With steering enabled but no active vectors, latency overhead is ≤5% across all tested batch sizes (within measurement noise of the baseline).
+1. **Enabling steering is effectively free.** With steering enabled but no active vectors, latency and throughput overhead is within measurement noise (-1.9% to +2.1%) across all tested batch sizes. Indistinguishable from the disabled baseline.
 2. **Memory cost is negligible.** 0.5 MB per config on Gemma-3-4B (bf16); ~16 MB at `max_steering_configs=32` — less than 0.1% of GPU memory.
-3. **Mixed-batch cost scales proportionally with active requests, not transitively.** Non-steered requests in a batch containing some steered requests pay only a small proportional share of the steering overhead, not the full per-request cost. This makes shared multi-tenant deployment viable.
-4. **Per-request steering has a batch-size-scaling overhead.** When all requests in a batch are actively steered: +9.7% latency at batch=1, +74% at batch=16, +124% at batch=32. Per-step cost roughly doubles with each batch-size doubling. Root cause identified.
+3. **Mixed-batch cost scales proportionally with active requests, not transitively.** Non-steered requests in a batch containing some steered requests pay only a small proportional share of the steering overhead. A workload with 5% steering traffic pays ~a few percent instance-wide overhead, not the ~74% all-active cost. Shared multi-tenant deployment is viable.
+4. **Per-step overhead fits a linear model: `cost ≈ 0.5 ms fixed + 0.58 ms × num_active`** (Gemma-3-4B, per decode step). The dominant term scales with the number of active steered requests, not with batch size. At batch=32 fully steered this amounts to +124% total latency.
 5. **Prefix caching works correctly.** Content-hashed cache keys deduplicate identical vectors across requests. No cache invalidation from steering.
-6. **CUDA graphs are preserved.** Steering doesn't break graph capture or replay.
-7. **The root cause of per-request overhead is `torch.compile` fusion loss around the opaque steering custom op.** This has a clear optimization path.
+6. **CUDA graphs are preserved.** Steering does not break graph capture or replay; graph effectiveness degrades modestly at larger batches.
+7. **Two optimization targets, not one.** Evidence supports (a) `torch.compile` fusion loss around the opaque custom op as a smaller fixed-per-step cost, and (b) a larger per-active-request cost whose exact mechanism has not been pinned down. Both are addressable independently.
 
 ## Methodology
 
@@ -103,7 +103,9 @@ Three key observations from this table:
 
 3. **At batch=32 fully steered, steering more than doubles total latency** (+123.6%). Per-request deployment without the fusion optimization is not viable at production batch sizes.
 
-**Throughput** (64 prompts, prompt_len=64, max_tokens=128)
+**Distinct-configs throughput** (64 prompts, prompt_len=64, max_tokens=128 — legacy measurement, superseded by the throughput matrix above for mode × batch analysis, but still the primary source for the `distinct_configs` dimension).
+
+With `max_steering_configs=4` (default):
 
 | distinct configs | tokens/sec | loss vs baseline |
 |---|---|---|
@@ -121,7 +123,7 @@ With `max_steering_configs=32` (ample table headroom):
 | 4 | 1792 | 71.1% |
 | 8 | 1723 | 72.2% |
 
-With sufficient table headroom, scaling from 1 to 8 distinct configs costs only ~7% throughput. **Table sizing matters enormously** — the gap between `max_steering_configs=4` and `max_steering_configs=32` at `distinct=4` (1210 → 1792 tok/s, +48%) is larger than the scheduler-bound serialization model in the latency ablation below fully accounts for. The latency ablation cleanly shows a threshold at `max_configs ≥ distinct-in-flight`, but the throughput benchmark continues to improve past that threshold; the residual gap is unexplained and a targeted experiment is open work.
+At batch=64 with sufficient table headroom, scaling from 1 to 8 distinct configs costs only ~7% extra throughput. The gap between `max_steering_configs=4` and `max_steering_configs=32` at `distinct=4` (1210 → 1792 tok/s, +48%) confirms **table sizing matters significantly** when the workload has more distinct configs than the table has room for; at `distinct=1` the bigger table provides no benefit, as expected.
 
 **Memory cost**
 - Measured per-config cost: **0.5 MB per additional `max_steering_configs`**
@@ -136,12 +138,12 @@ A batch contains a mix of steered and non-steered requests. Theoretical expectat
 
 Per-active-request marginal latency cost, computed from the throughput matrix as `(latency_with_n_active - latency_disabled) / n`:
 
-| batch size | all_steered cost/active | mixed cost/active (flat across fractions) |
-|---|---|---|
-| 4 | 86.8 ms | ~85 ms |
-| 8 | 77.9 ms | ~78 ms |
-| 16 | 75.3 ms | ~75 ms |
-| 32 | 73.8 ms | ~74 ms |
+| batch size | all_steered cost/active |
+|---|---|
+| 4 | 86.8 ms |
+| 8 | 77.9 ms |
+| 16 | 75.3 ms |
+| 32 | 73.8 ms |
 
 Cost per additional active request **converges to ~74 ms** at larger batch sizes and stays stable whether the active fraction is 25%, 50%, 75%, or 100%. Checked directly by computing successive deltas at batch=32:
 
@@ -150,9 +152,11 @@ Cost per additional active request **converges to ~74 ms** at larger batch sizes
 - 16 → 24 active: +583 ms ÷ 8 = **72.9 ms/active**
 - 24 → 32 active: +610 ms ÷ 8 = **76.3 ms/active**
 
-The cost is **proportional to active count, not transitive across the batch**. Confirmed across batch sizes 4, 8, 16, and 32 with intermediate points at 25%, 50%, 75%, and 100% active fractions.
+**Per-step linear model.** Fitting `per_step_cost = fixed + C × num_active` across all (batch, num_active) cells from the throughput matrix yields:
 
-The exact mechanism for the proportional behavior has not been pinned down but likely involves per-request model-runner work, scheduler behavior, or data-dependent paths in the steering update loop.
+`per_step_cost ≈ 0.5 ms fixed + 0.58 ms × num_active`
+
+At 128 decode steps per iter, this translates to **~74 ms per active request per iter**, matching the per-active deltas above. Notably, there is **no significant batch-proportional term** — the cost is dominated by per-active-request scaling, not by total batch size. This is surprising given the fusion-loss hypothesis and is discussed in the root cause section below.
 
 **Deployment implication:** A vLLM instance with `enable_steering=True` serving mixed traffic pays cost proportional to actual steering usage. For a workload where 5% of requests use steering, the effective instance-wide latency overhead is a few percent, not the ~74% all-active cost. Shared multi-tenant inference with steering is viable without penalizing non-steering users.
 
@@ -221,76 +225,115 @@ Key deltas between steering and disabled runs:
 |---|---|---|---|
 | `cudaLaunchKernel` wall | 240 ms | 311 ms | **+29%** (+70 ms, ~14k extra launches) |
 | `cudaStreamSynchronize` | not present | 204 calls, 1024 ms | **new** (1 sec of host-blocked sync) |
+| `aten::detach_` | not present | 204 calls, 15 ms | **new** (same count as the syncs) |
 | `aten::copy_` | 4800 calls, 50 ms | 18060 calls, 156 ms | +3.7x calls (populate vector copies) |
 | `aten::to` / `_to_copy` | 1152/1728 | 7884/8460 | +5x (device/dtype conversions) |
 | `cudaMemcpyAsync` | 3648 | 10380 | +2.8x (host-device transfers in register_config) |
 | `cudaGraphLaunch` | 294 | 294 | **unchanged** (graphs preserved) |
 
-Two observations:
+Three observations:
 
-1. **`cudaLaunchKernel` increases by ~14,000 launches** over 3 iters (~37 extra launches per decode step), consistent with fusion loss producing more, smaller kernels.
-2. **`cudaStreamSynchronize` appears 204 times, consuming ~1 second of wall time**, none of which exists in the disabled run. This is host-blocked synchronization in the per-step steering path — an immediate optimization target.
+1. **`cudaLaunchKernel` increases by ~14,000 launches** over 3 iters (~37 extra launches per decode step), consistent with some degree of fusion loss producing more, smaller kernels.
+2. **`cudaStreamSynchronize` appears 204 times, consuming ~1 second of wall time**, none of which exists in the disabled run. One sync per decode step on average.
+3. **`aten::detach_` appears exactly 204 times** — the same count as the syncs, suggesting both originate from the same code path. This pattern does not correspond to any explicit `detach_()` or synchronization call in the steering code; it likely reflects PyTorch's internal bookkeeping at a boundary specific to the steering execution path (candidate: implicit synchronization between eager `populate_steering_tables` writes and the subsequent CUDA graph replay that reads those buffers).
 
-## Root cause: triangulated evidence
+**Static code search.** A direct search of the steering code (`vllm/v1/worker/steering_manager.py`, `vllm/model_executor/layers/steering.py`, and the `_update_steering_buffers` method in `vllm/v1/worker/gpu_model_runner.py`) found **no explicit synchronization calls**: no `.item()`, no `.cpu()`, no `.tolist()`, no `.numpy()`, no `torch.cuda.synchronize()`, and no comparisons on GPU scalars in the hot path. All tensor operations (`.zero_()`, `.copy_()`, `.clone()`, `+`, `.to()`, `fill_`-style assignments) are async. The 204 syncs are therefore coming from PyTorch internals or implicit boundaries, not from a line of steering code we could simply delete.
 
-Five independent lines of evidence converge on **loss of `torch.compile` kernel fusion around the opaque steering op** as the primary cause of per-request overhead:
+## Root cause: two mechanisms
 
-1. **Microbenchmark**: the steering op kernel itself is cheap (~0.05 ms regardless of small token counts). The overhead cannot be attributed to the op's own compute cost.
-2. **CUDA graphs ablation**: graph replay is preserved (ratio ≥0.61) but graph benefit degrades with batch size. The cost is inside the graph — not graph break overhead — which must be unfused kernels.
-3. **Hook count ablation**: per-hook cost scales linearly with both hook count and batch size. Each hook breaks one additional fusion boundary per layer, and the lost fusion benefit scales with the data volume being fused. Memory bandwidth alone cannot explain the observed scale; fusion loss does.
-4. **Prefix cache ablation**: disabling prefix caching does not reduce per-request overhead (latency: 69.0% → 67.7%; throughput: 1824 → 1800 tok/s). Cache invalidation is ruled out.
-5. **Direct profiling**: `cudaLaunchKernel` wall time increases by 29% in the steering run, corresponding to ~14,000 additional kernel launches over 3 iterations. More launches = smaller kernels = broken fusion.
+Earlier drafts attributed all per-request overhead to `torch.compile` fusion loss around the opaque steering op. The more complete analysis supported by the throughput matrix shows **two separable cost sources**, with different scaling and different root causes:
 
-A secondary cost is **Python-level orchestration overhead** in `populate_steering_tables`, measured at ~2 ms per decode step from pure tensor copy + metadata bookkeeping, and ~1 second of accumulated `cudaStreamSynchronize` calls over 3 profiled iterations. This affects all batch sizes but is dominant only at small batches where fusion loss is less expensive.
+### Mechanism A: fixed per-step cost (~0.5 ms/step), probably fusion loss
 
-## What isn't the bottleneck
+Evidence:
+1. **Hook count ablation** shows latency scaling roughly linearly with hook count at small batches — each hook breaks one additional `torch.compile` fusion boundary per layer.
+2. **CUDA graph ablation** shows graph benefit is degraded with steering (speedup ratio 2.93x → 2.76x at b=1, 2.39x → 1.45x at b=64). Graph replay is preserved; the cost is *inside* the graph, consistent with unfused kernels.
+3. **Microbench** confirms the steering op kernel itself is cheap (~0.05 ms/call). The overhead cannot be the op's own compute cost.
+4. **Profiler** captures +14k extra `cudaLaunchKernel` calls in the steering run, corresponding to ~37 extra kernels per decode step — roughly what you'd expect from 3 hooks × ~12 unfused kernels each.
 
-Several candidates were tested and ruled out as significant contributors:
+These point to **loss of kernel fusion around the opaque op** — specifically, Inductor cannot fuse residual-add + layernorm + matmul through the opaque `apply_steering` op boundary, leaving more, smaller unfused kernels. The cost of this is visible as a roughly-fixed per-step penalty (~0.5 ms/step) that is largely independent of how many requests in the batch are actively steered.
 
-- **Prefix cache invalidation** (content hash works; ≤2% impact)
-- **Raw steering op kernel cost** (~0.05 ms, confirmed by microbench)
-- **`steering_index` construction loop** (~5 μs/request, ≤1.5% of overhead at batch=64)
-- **Memory bandwidth of the steering op** (≤0.1 ms/step by first-principles calculation)
-- **CUDA graph break at the graph replay level** (replay count unchanged, graphs preserved)
-- **Per-request `get_row_for_config` lookup cost** (sub-microsecond)
-- **Register/release cycle cost** (refcount-amortized to ~once per iter, not per request)
+### Mechanism B: per-active-request cost (~0.58 ms/step per active), unknown mechanism
+
+This is the dominant cost at production batch sizes and is **not explained by pure fusion loss**. Fusion loss should scale with total batch size (because unfused kernels process the whole residual tensor). Instead, we observe cost scaling with `num_active` — the number of steered requests — independent of total batch size.
+
+Candidates:
+
+1. **Implicit synchronization between populate and graph replay.** `populate_steering_tables` launches ~100 eager kernels before each forward pass. The subsequent CUDA graph replay reads the same buffers. PyTorch / vLLM may be inserting implicit stream synchronization to enforce ordering, making each decode step wait for populate to finish. This fits the "one sync per step" count in the profile but does *not* cleanly explain the proportional-to-active scaling.
+2. **Per-active work elsewhere in the engine.** Something in the sampler, detokenizer, or request state management may do per-active-config work. The steering code itself (inspected via static analysis) does not, but the rest of the V1 engine has not been audited.
+3. **GPU memory access patterns in the indexed gather** depend on index distribution. All tokens pointing to row 0 is maximally cache-friendly; mixed index values are less so. Speculative; does not quantitatively explain 0.58 ms/step per active.
+4. **Something in continuous batching's treatment of steering-active requests** that sub-batches them differently from unsteered requests. Requires reading the V1 scheduler to confirm or refute.
+
+### Other rule-outs
+
+From direct measurement:
+
+- **Prefix cache invalidation** — ruled out. Disabling prefix caching does not reduce per-request overhead (latency: 69.0% → 67.7%; throughput: 1824 → 1800 tok/s). The content-hashed cache key works correctly.
+- **Raw steering op kernel cost** — ruled out at ~0.05 ms/call.
+- **`steering_index` construction loop** — ruled out at ~5 μs/request (≤1.5% of overhead at batch=64).
+- **`populate_steering_tables` Python overhead alone** — measured at ~2 ms/step in isolation. Can account for the fixed per-step component but **cannot** account for per-active-request scaling (the populate loop iterates `active_configs`, not `active_requests`).
+- **`get_row_for_config` lookup cost** — sub-microsecond; ruled out.
+- **Register/release cycle cost** — refcount-amortized to ~once per iter, not per request. Not in the hot path.
+- **`cudaLaunchKernel` launch overhead alone** — only 70 ms total delta over 3 iters; at most a small fraction of the observed per-active cost.
 
 ## Optimization roadmap
 
-Concrete targets, with expected impact grounded in the measurements above:
+Concrete targets, ordered by expected impact. The top two correspond to the two root-cause mechanisms; the remainder are tractable improvements grounded in the measurements above.
 
-### 1. `torch.compile` fusion through the steering op (largest impact)
-Make the steering op transparent to Inductor so fusion can proceed through it. Options:
-- Split into functional gather + add components that Inductor can fuse individually into adjacent residual/layernorm operations.
-- Register as `@torch.library.custom_op` with a functional impl Inductor can reason about.
-- Add a custom Inductor pass that recognizes the steering op pattern and inlines it.
+### 1. Identify the per-active-request cost source (highest impact)
 
-**Expected impact**: eliminates the batch-size-dependent per-step cost. Hook count should become free. Per-step overhead should drop from ~37 ms/step to ~1-2 ms/step at batch=64.
+**Status**: mechanism unknown. The per-step overhead fit is `0.58 ms × num_active`. At batch=32 this is 18.5 ms/step or ~2.4 s per iter — the dominant cost at production batch sizes.
 
-### 2. Eliminate per-step host-GPU sync (`cudaStreamSynchronize`)
-Profile shows 204 sync calls totaling ~1 second of wall time over 3 iterations that only occur in the steering path. Identify the source (likely a `.item()`, `.detach_()`, or CPU-side control flow on a GPU tensor in the per-step update) and remove it.
+**Diagnostic approach**: add NVTX annotations around suspected sections and profile with `nsys`:
 
-**Expected impact**: ~10% wall-clock savings at small-to-medium batches based on profile measurements. Independent of the fusion fix.
+```python
+import torch.cuda.nvtx as nvtx
+nvtx.range_push("populate_steering_tables"); ...; nvtx.range_pop()
+nvtx.range_push("build_steering_index"); ...; nvtx.range_pop()
+nvtx.range_push("model_forward"); ...; nvtx.range_pop()
+```
+
+The NVTX timeline in nsys will show exactly which section scales with `num_active` and where the time goes. Once identified:
+
+- If it's an implicit sync between eager populate and graph replay → restructure populate to use a CUDA stream that the graph can wait on, or convert populate itself to a captured operation.
+- If it's per-active work elsewhere in the engine → refactor that path.
+- If it's GPU memory access pattern dependent → pre-sort or pack the steering index to be cache-friendly.
+
+**Expected impact**: if the proportional term is fully eliminated, per-step overhead drops from ~18.5 ms at b=32 all-steered to ~0.5 ms (the fixed cost only). That's ~97% reduction at production batch sizes.
+
+### 2. `torch.compile` fusion through the steering op
+
+Responsible for the ~0.5 ms/step fixed cost under the two-mechanism model. Make the steering op transparent to Inductor so fusion can proceed through it:
+
+- Split into functional gather + residual-add components that Inductor can fuse individually into adjacent layernorm/matmul operations.
+- Register with `@torch.library.custom_op` and provide a functional impl Inductor can reason about.
+- Add a custom Inductor pass that recognizes the steering op pattern and inlines it into adjacent ops.
+
+**Expected impact**: eliminates the fixed per-step component. Hook count becomes nearly free (confirms the hook count ablation's linear scaling is fusion loss). ~0.5 ms/step savings across all batch sizes.
 
 ### 3. Batch `populate_steering_tables` into fewer CUDA calls
+
 Currently launches ~100 small kernels per decode step (one `.zero_()` and up to one `.copy_()` per (layer, hook) combination). Instead: build a single flat update tensor on CPU, transfer once, scatter into tables with one call.
 
-**Expected impact**: `populate_steering_tables` drops from ~2 ms/step to <0.5 ms/step. Most of the value at small batches.
+**Expected impact**: `populate_steering_tables` drops from ~2 ms/step in isolation to <0.5 ms/step. Most of the value at small batches. May also eliminate the "sync between populate and graph replay" candidate mechanism for #1 above.
 
 ### 4. Skip inactive hook points in populate
+
 The loop always iterates all 3 hook points. When only 1 hook is actively set, 2/3 of the work is wasted zeroing rows. Track `active_hook_points: set[str]` and skip hook points outside the set.
 
-**Expected impact**: ~60% populate-cost reduction when users set only one hook (the common case).
+**Expected impact**: ~60% populate-cost reduction when users set only one hook (the common case). Stacks with #3.
 
 ### 5. Cache populate output when config state is stable
+
 Most decode steps don't change the active config set — same configs, same vectors. Add a "dirty" flag and skip populate when the state hasn't changed.
 
-**Expected impact**: `populate_steering_tables` becomes effectively free in the steady state (most decode steps).
+**Expected impact**: `populate_steering_tables` becomes effectively free in the steady state (most decode steps). Stacks with #3 and #4.
 
 ### 6. Pre-convert vectors at SamplingParams construction
-`register_config` currently converts Python lists to CUDA tensors on every registration. Measurement: ~9 ms per registration cycle at 1 config × 3 hooks, scaling to ~145 ms at 16 configs × 3 hooks. Pre-converting at the serving boundary would move this cost out of the hot path.
 
-**Expected impact**: eliminates a tail-latency risk at high-config-churn workloads. Not critical at current default max_configs=4.
+`register_config` currently converts Python lists to CUDA tensors on every registration. Measurement: ~3 ms per register+release cycle at 1 config × 1 hook, scaling to ~145 ms at 16 configs × 3 hooks. Pre-converting at the serving boundary would move this cost out of the hot path.
+
+**Expected impact**: eliminates a tail-latency risk at high-config-churn workloads. Not critical at current default `max_steering_configs=4`.
 
 ## Usage recommendations (with current implementation)
 
@@ -312,12 +355,18 @@ Quantitative head-to-head comparison against TransformerLens, nnsight, repeng, a
 - **Zero cost to enable the feature.** `enabled_idle` mode shows ≤5% latency overhead across all batch sizes, so a team can deploy steering without penalty for requests that don't use it.
 - **Scalable integration.** A team already running vLLM in production can add steering without adopting a new framework or reimplementing their serving pipeline.
 
+## Follow-up benchmarks
+
+A **table sizing matrix** benchmark (`scripts/bench_table_sizing.py`) is available to isolate the interaction of `max_steering_configs × batch_size × distinct_configs` with two values of `max_steering_configs` (4 and 16), three distinct-config counts (1, 4, 8), and three batch sizes (8, 16, 32). Results for this sweep are pending a run; it replaces the ambiguity in the existing `ablation.config_scaling` benchmark (which conflates `max_steering_configs` with the number of distinct configs in its workload) by varying each axis independently.
+
+The current `ablation.config_scaling` table above has a methodological caveat: its benchmark design couples `max_steering_configs` to `distinct_configs_in_workload` via `min(max_cfg, batch_size)`, so the 1→8 improvement cannot be cleanly attributed to row-count alone versus distinct-config-count alone. The plateau above the threshold is the clean, actionable finding from that table; the sub-threshold pattern is better isolated by the new `bench_table_sizing` benchmark.
+
 ## Scaling projections
 
 For a hypothetical dense 1T model (`hidden_size=20480, num_layers=160`):
 
 - **Memory**: ~656 MB at `max_steering_configs=32`. Less than 0.03% of weights; negligible.
-- **Per-step overhead (current implementation)**: extrapolating from Gemma-3-4B by `hidden_size × num_layers` scaling, ~1.4 s per decode step at batch=64 — **not viable** without the fusion optimization.
-- **Per-step overhead (post-optimization)**: projected <50 ms per step at batch=64, which makes large-model steering feasible.
+- **Per-step overhead (current implementation)**: extrapolating from Gemma-3-4B by `hidden_size × num_layers` scaling, per-step cost is estimated in the 1+ second range at batch=64 — **not viable** for production deployment without the optimizations above. The precise projection depends on whether the dominant `per-active-request` cost scales with `hidden_size × num_layers` (likely, if it's GPU memory bandwidth related) or stays roughly constant (unlikely, but possible if it's scheduler or engine bookkeeping).
+- **Per-step overhead (post-optimization)**: if both root-cause mechanisms are addressed, the projected per-step overhead at batch=64 is in the low tens of milliseconds — making large-model steering feasible.
 
 The optimization work is **not an incremental improvement but a requirement for scaling steering to production models**.
