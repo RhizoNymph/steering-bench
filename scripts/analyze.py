@@ -88,6 +88,34 @@ def _tps_field(row: pd.Series, stat: str = "mean") -> float | None:
     return None
 
 
+# Model shape lookup for theoretical memory recomputation. Early memory
+# benchmark runs wrote theoretical_mb using an fp32 formula; we recompute
+# freshly here for bf16 instead of trusting the stored value.
+MODEL_SHAPES = {
+    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
+    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
+    "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
+    "meta-llama/Llama-3.1-70B": {"hidden_size": 8192, "num_layers": 80},
+}
+
+
+def theoretical_memory_mb(
+    model: str, max_configs: int, dtype_bytes: int = 2
+) -> float | None:
+    """Recompute theoretical steering buffer memory in MB (bf16 by default).
+
+    Formula: 3 hooks × (max_configs + 3) × hidden_size × dtype_bytes × num_layers.
+    Returns None if model shape is unknown or max_configs is 0/invalid.
+    """
+    shape = MODEL_SHAPES.get(model)
+    if shape is None or not max_configs or max_configs <= 0:
+        return None
+    bytes_total = (
+        3 * (max_configs + 3) * shape["hidden_size"] * dtype_bytes * shape["num_layers"]
+    )
+    return bytes_total / (1024 * 1024)
+
+
 # ── vLLM latency ──────────────────────────────────────────────────────────────
 
 
@@ -396,26 +424,33 @@ def plot_mixed_batch(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
 
 
 def plot_memory_scaling(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
-    """Memory cost vs max_steering_configs, measured vs theoretical."""
+    """Memory cost vs max_steering_configs, measured vs theoretical (bf16)."""
     data = df[df["benchmark"] == "vllm.memory"].copy()
     if data.empty:
         return
 
     data = data.sort_values("param_max_steering_configs")
-    # Filter to rows that have a delta (skip the baseline row if null)
     configs = data["param_max_steering_configs"].values
     delta = data.get("result_steering_delta_mb")
-    theoretical = data.get("result_theoretical_mb")
-
     if delta is None:
         return
 
+    # Recompute theoretical in bf16 per row (fresh, not from stored value)
+    theoretical_vals = []
+    for _, row in data.iterrows():
+        model = row.get("param_model", "google/gemma-3-4b-it")
+        mc = row.get("param_max_steering_configs")
+        t = theoretical_memory_mb(model, int(mc) if pd.notna(mc) else 0)
+        theoretical_vals.append(t if t is not None else np.nan)
+
     fig, ax = plt.subplots()
-    ax.plot(configs, delta.values, "o-", label="Measured", linewidth=2, markersize=7, color="#2196F3")
-    if theoretical is not None and not theoretical.isna().all():
+    ax.plot(
+        configs, delta.values, "o-", label="Measured", linewidth=2, markersize=7, color="#2196F3"
+    )
+    if any(v is not None and not np.isnan(v) for v in theoretical_vals):
         ax.plot(
             configs,
-            theoretical.values,
+            theoretical_vals,
             "s--",
             label="Theoretical (bf16)",
             linewidth=2,
@@ -424,7 +459,7 @@ def plot_memory_scaling(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
         )
     ax.set_xlabel("max_steering_configs")
     ax.set_ylabel("Steering buffer memory (MB)")
-    ax.set_title("Memory scaling: measured vs theoretical (Gemma-3-4B)")
+    ax.set_title("Memory scaling: measured vs theoretical (Gemma-3-4B, bf16)")
     ax.legend()
     _save(fig, output_dir / f"memory_scaling.{fmt}", f"memory_scaling.{fmt}")
 
@@ -731,14 +766,21 @@ def print_text_summary(df: pd.DataFrame) -> None:
     # Memory
     memory = df[df["benchmark"] == "vllm.memory"]
     if not memory.empty and "result_steering_delta_mb" in memory.columns:
-        print("\n  Memory cost per max_steering_configs:")
+        print("\n  Memory cost per max_steering_configs (theoretical = bf16):")
         for _, row in memory.sort_values("param_max_steering_configs").iterrows():
             configs = row.get("param_max_steering_configs")
             delta = row.get("result_steering_delta_mb")
-            theory = row.get("result_theoretical_mb")
+            model = row.get("param_model", "google/gemma-3-4b-it")
             if configs and delta is not None and configs > 0:
-                theory_str = f" (theory: {theory:.1f} MB)" if theory else ""
-                print(f"    configs={int(configs)}: {delta:.1f} MB{theory_str}")
+                theory = theoretical_memory_mb(model, int(configs))
+                if theory is not None:
+                    ratio = delta / theory if theory > 0 else 0
+                    print(
+                        f"    configs={int(configs)}: {delta:.1f} MB "
+                        f"(theory: {theory:.1f} MB, ratio: {ratio:.2f}x)"
+                    )
+                else:
+                    print(f"    configs={int(configs)}: {delta:.1f} MB")
 
     # Mixed batch
     mixed = df[df["benchmark"] == "vllm.mixed_batch"]
