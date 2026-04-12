@@ -420,6 +420,141 @@ def plot_mixed_batch(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
     _save(fig, output_dir / f"mixed_batch.{fmt}", f"mixed_batch.{fmt}")
 
 
+# ── Table sizing (max_cfg × batch × distinct) ─────────────────────────────────
+
+
+def plot_table_sizing(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
+    """Table sizing: throughput loss vs distinct, with max_cfg as line per panel."""
+    data = df[df["benchmark"] == "vllm.table_sizing"].copy()
+    if data.empty:
+        return
+
+    # Baselines: mode=disabled rows (max_steering_configs=0)
+    baseline_rows = data[data["param_mode"] == "disabled"]
+    disabled_tps: dict[float, float] = {}
+    disabled_lat: dict[float, float] = {}
+    for _, r in baseline_rows.iterrows():
+        bs = r["param_batch_size"]
+        tps = _tps_field(r)
+        lat = r.get("result_latency_ms_mean_ms")
+        if tps and pd.notna(bs):
+            disabled_tps[bs] = tps
+        if lat and pd.notna(bs):
+            disabled_lat[bs] = lat
+
+    steered = data[data["param_mode"] == "steered"].copy()
+    if steered.empty:
+        return
+
+    batch_sizes = sorted(steered["param_batch_size"].dropna().unique())
+    max_cfgs = sorted(steered["param_max_steering_configs"].dropna().unique())
+    if not batch_sizes or not max_cfgs:
+        return
+
+    # Panel colors per max_cfg
+    max_cfg_colors = {
+        int(mc): plt.cm.viridis(i / max(1, len(max_cfgs) - 1))
+        for i, mc in enumerate(max_cfgs)
+    }
+
+    # ── Throughput loss % panels ────────────────────────────────────────────
+    fig, axes = plt.subplots(1, len(batch_sizes), figsize=(5 * len(batch_sizes), 5), sharey=True)
+    if len(batch_sizes) == 1:
+        axes = [axes]
+
+    for ax, bs in zip(axes, batch_sizes):
+        baseline = disabled_tps.get(bs)
+        for mc in max_cfgs:
+            rows = steered[
+                (steered["param_batch_size"] == bs)
+                & (steered["param_max_steering_configs"] == mc)
+            ].sort_values("param_distinct_configs")
+            if rows.empty:
+                continue
+            x = rows["param_distinct_configs"].values
+            tps_vals = [_tps_field(r) for _, r in rows.iterrows()]
+            if baseline and baseline > 0:
+                y = [
+                    ((baseline - t) / baseline * 100) if t else None
+                    for t in tps_vals
+                ]
+            else:
+                y = tps_vals
+            ax.plot(
+                x,
+                y,
+                "o-",
+                label=f"max_cfg={int(mc)}",
+                color=max_cfg_colors[int(mc)],
+                linewidth=2,
+                markersize=7,
+            )
+
+        ax.set_title(f"batch={int(bs)}")
+        ax.set_xlabel("distinct steering configs in batch")
+        ax.grid(alpha=0.3)
+        if ax == axes[0]:
+            ax.set_ylabel(
+                "Throughput loss vs disabled (%)"
+                if disabled_tps
+                else "Throughput (tokens/sec)"
+            )
+        ax.legend()
+
+    fig.suptitle(
+        "Table sizing: throughput loss vs distinct configs, per batch size",
+        fontsize=13,
+    )
+    _save(fig, output_dir / f"table_sizing_throughput.{fmt}", f"table_sizing_throughput.{fmt}")
+
+    # ── Latency overhead % panels ───────────────────────────────────────────
+    fig, axes = plt.subplots(1, len(batch_sizes), figsize=(5 * len(batch_sizes), 5), sharey=True)
+    if len(batch_sizes) == 1:
+        axes = [axes]
+
+    for ax, bs in zip(axes, batch_sizes):
+        baseline_ms = disabled_lat.get(bs)
+        for mc in max_cfgs:
+            rows = steered[
+                (steered["param_batch_size"] == bs)
+                & (steered["param_max_steering_configs"] == mc)
+            ].sort_values("param_distinct_configs")
+            if rows.empty:
+                continue
+            x = rows["param_distinct_configs"].values
+            lat_vals = rows["result_latency_ms_mean_ms"].values
+            if baseline_ms and baseline_ms > 0:
+                y = [(lat - baseline_ms) / baseline_ms * 100 for lat in lat_vals]
+            else:
+                y = lat_vals
+            ax.plot(
+                x,
+                y,
+                "o-",
+                label=f"max_cfg={int(mc)}",
+                color=max_cfg_colors[int(mc)],
+                linewidth=2,
+                markersize=7,
+            )
+
+        ax.set_title(f"batch={int(bs)}")
+        ax.set_xlabel("distinct steering configs in batch")
+        ax.grid(alpha=0.3)
+        if ax == axes[0]:
+            ax.set_ylabel(
+                "Latency overhead vs disabled (%)"
+                if disabled_lat
+                else "Latency (ms)"
+            )
+        ax.legend()
+
+    fig.suptitle(
+        "Table sizing: latency overhead vs distinct configs, per batch size",
+        fontsize=13,
+    )
+    _save(fig, output_dir / f"table_sizing_latency.{fmt}", f"table_sizing_latency.{fmt}")
+
+
 # ── Memory ────────────────────────────────────────────────────────────────────
 
 
@@ -898,6 +1033,63 @@ def print_text_summary(df: pd.DataFrame) -> None:
                     pct = (h3 - h1) / h1 * 100
                     print(f"    batch={int(bs)}: 1→3 hooks adds {h3 - h1:.0f}ms ({pct:+.1f}%)")
 
+    # Table sizing interaction
+    tsize = df[df["benchmark"] == "vllm.table_sizing"]
+    if not tsize.empty:
+        # Build disabled baseline lookup
+        base = tsize[tsize["param_mode"] == "disabled"]
+        base_tps: dict[float, float] = {}
+        for _, r in base.iterrows():
+            bs = r.get("param_batch_size")
+            tps = _tps_field(r)
+            if tps and pd.notna(bs):
+                base_tps[bs] = tps
+
+        steered = tsize[tsize["param_mode"] == "steered"]
+        if not steered.empty and base_tps:
+            max_cfgs = sorted(steered["param_max_steering_configs"].dropna().unique())
+            if len(max_cfgs) >= 2:
+                small_max = min(max_cfgs)
+                large_max = max(max_cfgs)
+                print(
+                    f"\n  Table sizing benefit (max_cfg={int(large_max)} vs "
+                    f"{int(small_max)}) — throughput loss reduction:"
+                )
+                for bs in sorted(steered["param_batch_size"].dropna().unique()):
+                    for distinct in sorted(
+                        steered["param_distinct_configs"].dropna().unique()
+                    ):
+                        small_row = steered[
+                            (steered["param_batch_size"] == bs)
+                            & (steered["param_max_steering_configs"] == small_max)
+                            & (steered["param_distinct_configs"] == distinct)
+                        ]
+                        large_row = steered[
+                            (steered["param_batch_size"] == bs)
+                            & (steered["param_max_steering_configs"] == large_max)
+                            & (steered["param_distinct_configs"] == distinct)
+                        ]
+                        baseline = base_tps.get(bs)
+                        if (
+                            small_row.empty
+                            or large_row.empty
+                            or baseline is None
+                            or baseline <= 0
+                        ):
+                            continue
+                        small_tps = _tps_field(small_row.iloc[0])
+                        large_tps = _tps_field(large_row.iloc[0])
+                        if small_tps is None or large_tps is None:
+                            continue
+                        small_loss = (baseline - small_tps) / baseline * 100
+                        large_loss = (baseline - large_tps) / baseline * 100
+                        delta = small_loss - large_loss
+                        print(
+                            f"    batch={int(bs)} distinct={int(distinct)}: "
+                            f"{small_loss:.1f}% → {large_loss:.1f}% "
+                            f"(benefit: {delta:+.1f}pp)"
+                        )
+
     print(f"\n{'=' * 70}")
 
 
@@ -936,6 +1128,7 @@ def main():
     plot_throughput_by_configs(df, output_dir, args.format)
     plot_throughput_matrix(df, output_dir, args.format)
     plot_mixed_batch(df, output_dir, args.format)
+    plot_table_sizing(df, output_dir, args.format)
     plot_memory_scaling(df, output_dir, args.format)
 
     # Ablations
