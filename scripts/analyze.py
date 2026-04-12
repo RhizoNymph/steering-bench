@@ -603,88 +603,169 @@ def plot_memory_scaling(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
 
 
 def plot_cuda_graphs_ablation(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
-    """CUDA graphs 2x2 heatmap and per-step overhead derivation."""
+    """CUDA graphs ablation: eager vs graphs across batch sizes.
+
+    Produces:
+      - cuda_graphs_latency.png: 4 lines (eager/graphs × steer on/off), latency vs batch
+      - cuda_graphs_throughput.png: same 4 lines, throughput vs batch
+      - cuda_graphs_speedup.png: graph speedup ratio, with vs without steering
+      - per_step_overhead.png: per-step steering overhead vs batch size
+    """
     data = df[df["benchmark"] == "ablation.cuda_graphs"].copy()
     if data.empty:
         return
 
     batch_sizes = sorted(data["param_batch_size"].dropna().unique())
+    if not batch_sizes:
+        return
 
-    # 2x2 heatmap per batch size
-    for bs in batch_sizes:
-        bs_data = data[data["param_batch_size"] == bs]
-        if len(bs_data) < 4:
-            continue
-        matrix = np.zeros((2, 2))
-        for _, row in bs_data.iterrows():
-            eager_idx = 1 if row.get("param_enforce_eager") else 0
-            steer_idx = 1 if row.get("param_enable_steering") else 0
-            matrix[eager_idx, steer_idx] = row.get("result_latency_ms_mean_ms", 0)
+    # Extract (latency, throughput) per (batch_size, enforce_eager, enable_steering)
+    def get_row(bs, eager: bool, steer: bool):
+        row = data[
+            (data["param_batch_size"] == bs)
+            & (data["param_enforce_eager"] == eager)
+            & (data["param_enable_steering"] == steer)
+        ]
+        if row.empty:
+            return None
+        r = row.iloc[0]
+        lat = r.get("result_latency_ms_mean_ms")
+        if lat is None or pd.isna(lat):
+            return None
+        # Derive throughput from latency + parameters
+        prompt_len = r.get("param_prompt_len", 64)
+        max_tokens = r.get("param_max_tokens", 128)
+        total_tokens = bs * (prompt_len + max_tokens)
+        tps = total_tokens / (lat / 1000.0) if lat > 0 else None
+        return {"latency": lat, "throughput": tps}
 
-        fig, ax = plt.subplots(figsize=(7, 5))
-        im = ax.imshow(matrix, cmap="YlOrRd", aspect="auto")
-        ax.set_xticks([0, 1])
-        ax.set_yticks([0, 1])
-        ax.set_xticklabels(["Steering Off", "Steering On"])
-        ax.set_yticklabels(["CUDA Graphs", "Eager"])
-        ax.set_title(f"CUDA Graphs × Steering (batch={int(bs)})")
-        for i in range(2):
-            for j in range(2):
-                ax.text(
-                    j,
-                    i,
-                    f"{matrix[i, j]:.0f}ms",
-                    ha="center",
-                    va="center",
-                    fontsize=14,
-                    fontweight="bold",
-                )
-        fig.colorbar(im, label="Latency (ms)")
-        _save(
-            fig,
-            output_dir / f"cuda_graphs_bs{int(bs)}.{fmt}",
-            f"cuda_graphs_bs{int(bs)}.{fmt}",
+    # Build per-configuration series
+    configs = [
+        ("graphs_no_steer", False, False, "#2196F3", "-"),
+        ("graphs_w_steer", False, True, "#F44336", "-"),
+        ("eager_no_steer", True, False, "#2196F3", "--"),
+        ("eager_w_steer", True, True, "#F44336", "--"),
+    ]
+
+    series: dict[str, dict] = {}
+    for label, eager, steer, color, style in configs:
+        lat_vals = []
+        tps_vals = []
+        for bs in batch_sizes:
+            cell = get_row(bs, eager, steer)
+            lat_vals.append(cell["latency"] if cell else np.nan)
+            tps_vals.append(cell["throughput"] if cell else np.nan)
+        series[label] = {
+            "latency": lat_vals,
+            "throughput": tps_vals,
+            "color": color,
+            "style": style,
+        }
+
+    # ── 4-line latency chart ────────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    for label, s in series.items():
+        ax.plot(
+            batch_sizes,
+            s["latency"],
+            marker="o",
+            linestyle=s["style"],
+            color=s["color"],
+            label=label.replace("_", " "),
+            linewidth=2,
+            markersize=7,
         )
+    ax.set_xlabel("Batch size")
+    ax.set_ylabel("Latency (ms)")
+    ax.set_title("CUDA graphs × steering: latency vs batch size")
+    ax.set_xscale("log", base=2)
+    ax.legend()
+    _save(fig, output_dir / f"cuda_graphs_latency.{fmt}", f"cuda_graphs_latency.{fmt}")
 
-    # Per-step overhead derivation (the headline fusion-loss chart)
-    batch_sizes_sorted = sorted(batch_sizes)
+    # ── 4-line throughput chart ─────────────────────────────────────────────
+    fig, ax = plt.subplots()
+    for label, s in series.items():
+        ax.plot(
+            batch_sizes,
+            s["throughput"],
+            marker="o",
+            linestyle=s["style"],
+            color=s["color"],
+            label=label.replace("_", " "),
+            linewidth=2,
+            markersize=7,
+        )
+    ax.set_xlabel("Batch size")
+    ax.set_ylabel("Throughput (tokens/sec)")
+    ax.set_title("CUDA graphs × steering: throughput vs batch size")
+    ax.set_xscale("log", base=2)
+    ax.legend()
+    _save(fig, output_dir / f"cuda_graphs_throughput.{fmt}", f"cuda_graphs_throughput.{fmt}")
+
+    # ── Graph speedup ratio (headline interaction chart) ────────────────────
+    # speedup_no_steer = eager_no_steer / graphs_no_steer
+    # speedup_w_steer  = eager_w_steer  / graphs_w_steer
+    speedup_no_steer = []
+    speedup_w_steer = []
+    for i, bs in enumerate(batch_sizes):
+        g_ns = series["graphs_no_steer"]["latency"][i]
+        g_ws = series["graphs_w_steer"]["latency"][i]
+        e_ns = series["eager_no_steer"]["latency"][i]
+        e_ws = series["eager_w_steer"]["latency"][i]
+        speedup_no_steer.append(e_ns / g_ns if g_ns and not np.isnan(g_ns) else np.nan)
+        speedup_w_steer.append(e_ws / g_ws if g_ws and not np.isnan(g_ws) else np.nan)
+
+    fig, ax = plt.subplots()
+    ax.plot(
+        batch_sizes,
+        speedup_no_steer,
+        "o-",
+        color="#2196F3",
+        label="without steering",
+        linewidth=2,
+        markersize=8,
+    )
+    ax.plot(
+        batch_sizes,
+        speedup_w_steer,
+        "s-",
+        color="#F44336",
+        label="with steering",
+        linewidth=2,
+        markersize=8,
+    )
+    ax.axhline(y=1.0, color="gray", linestyle=":", alpha=0.5, label="no speedup")
+    ax.set_xlabel("Batch size")
+    ax.set_ylabel("CUDA graph speedup (eager / graphs)")
+    ax.set_title("CUDA graph benefit: preserved without steering, degraded with steering")
+    ax.set_xscale("log", base=2)
+    ax.legend()
+    _save(fig, output_dir / f"cuda_graphs_speedup.{fmt}", f"cuda_graphs_speedup.{fmt}")
+
+    # ── Per-step steering overhead (keep this one, it's the headline chart) ─
     graphs_deltas = []
     eager_deltas = []
-    for bs in batch_sizes_sorted:
-        rows = data[data["param_batch_size"] == bs]
-        try:
-            gno = rows[
-                (rows["param_enforce_eager"] == False)  # noqa: E712
-                & (rows["param_enable_steering"] == False)
-            ].iloc[0]["result_latency_ms_mean_ms"]
-            gws = rows[
-                (rows["param_enforce_eager"] == False)
-                & (rows["param_enable_steering"] == True)
-            ].iloc[0]["result_latency_ms_mean_ms"]
-            eno = rows[
-                (rows["param_enforce_eager"] == True)
-                & (rows["param_enable_steering"] == False)
-            ].iloc[0]["result_latency_ms_mean_ms"]
-            ews = rows[
-                (rows["param_enforce_eager"] == True)
-                & (rows["param_enable_steering"] == True)
-            ].iloc[0]["result_latency_ms_mean_ms"]
-        except (IndexError, KeyError):
+    for i, bs in enumerate(batch_sizes):
+        g_ns = series["graphs_no_steer"]["latency"][i]
+        g_ws = series["graphs_w_steer"]["latency"][i]
+        e_ns = series["eager_no_steer"]["latency"][i]
+        e_ws = series["eager_w_steer"]["latency"][i]
+        if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in [g_ns, g_ws, e_ns, e_ws]):
             continue
-        # Assume ~128 decode steps
-        steps = 128
-        graphs_deltas.append((bs, (gws - gno) / steps))
-        eager_deltas.append((bs, (ews - eno) / steps))
+        steps = 128  # approximate decode steps (max_tokens=128 default)
+        graphs_deltas.append((bs, (g_ws - g_ns) / steps))
+        eager_deltas.append((bs, (e_ws - e_ns) / steps))
 
     if graphs_deltas and eager_deltas:
         fig, ax = plt.subplots()
         gbs, gvals = zip(*graphs_deltas)
         ebs, evals = zip(*eager_deltas)
-        ax.plot(gbs, gvals, "o-", label="with CUDA graphs", linewidth=2, markersize=7)
-        ax.plot(ebs, evals, "s--", label="eager (no graphs)", linewidth=2, markersize=7)
+        ax.plot(gbs, gvals, "o-", label="with CUDA graphs", linewidth=2, markersize=8, color="#2196F3")
+        ax.plot(ebs, evals, "s--", label="eager (no graphs)", linewidth=2, markersize=8, color="#F44336")
         ax.set_xlabel("Batch size")
         ax.set_ylabel("Per-step steering overhead (ms)")
         ax.set_title("Per-step steering overhead scales with batch size")
+        ax.set_xscale("log", base=2)
         ax.legend()
         _save(fig, output_dir / f"per_step_overhead.{fmt}", f"per_step_overhead.{fmt}")
 
