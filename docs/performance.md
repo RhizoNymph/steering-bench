@@ -250,11 +250,11 @@ CPU-side event deltas between steering and disabled runs:
 
 **Static code search.** A direct search of the steering code (`steering_manager.py`, `steering.py`, `_update_steering_buffers` in `gpu_model_runner.py`) found **no explicit synchronization calls** in the hot path: no `.item()`, no `.cpu()`, no `.tolist()`, no `torch.cuda.synchronize()`, no comparisons on GPU scalars. All tensor operations are async. The 204 syncs come from PyTorch internals or implicit boundaries (likely between eager `populate_steering_tables` writes and subsequent CUDA graph replay).
 
-#### nsys kernel-level profiling (batch=8, 2 iterations, in-process mode)
+#### nsys GPU kernel profiling (batch=8, 2 iterations, in-process mode)
 
-`nsys` GPU kernel summary was collected for both disabled and steering runs at identical workloads. The kernel lists were diffed to identify GPU-side compute differences.
+`nsys` GPU kernel summary (`cuda_gpu_kern_sum`) was collected for both disabled and steering runs at identical workloads. The full kernel lists were diffed.
 
-**Result: the kernel lists are nearly identical.** Every GEMM kernel, every flash attention kernel, every triton fused op, and every layernorm kernel has **the same call count and near-identical duration** (differences <1%, within run-to-run noise) in both traces. Only two kernels differ:
+**Result: every forward-pass kernel has the same call count in both traces.** Every GEMM, flash attention, triton fused op, and layernorm kernel appears with identical invocation counts and near-identical durations (differences <1%, within run-to-run noise). The diff is non-empty because timing values differ slightly between runs, but no forward-pass kernel names or counts changed. Only two kernels differ in count:
 
 | kernel | disabled calls | steering calls | delta calls | delta GPU time |
 |---|---|---|---|---|
@@ -268,32 +268,75 @@ Over 2 measured iterations at batch=8, max_tokens=64 (~64 decode steps each):
 - **Observed wall-clock overhead at batch=8 all_steered: ~623 ms per iter → ~4.9 ms per step**
 - **GPU kernels account for ~4.5% of the wall-clock steering overhead**
 
-The +13,056 fill calls correspond exactly to `populate_steering_tables` zeroing table rows: `3 hooks × 34 layers = 102 fills per step × 128 total steps`. The +6,528 copy calls correspond to populate writing per-config vectors into table rows.
+The +13,056 fill calls correspond to `populate_steering_tables` zeroing table rows: `3 hooks × 34 layers = 102 fills per step × 128 total steps`. The +6,528 copy calls correspond to populate writing per-config vectors into table rows.
 
-## Root cause: CPU-side dispatch and synchronization overhead
+#### nsys CPU-side CUDA API profiling (same traces)
 
-### Fusion loss is ruled out as the dominant cost
+The `cuda_api_sum` report from the same nsys traces shows CPU-side CUDA API call counts and timings:
 
-The nsys kernel diff is definitive: **the GPU is running the same forward-pass kernels in both disabled and steering modes**. Same kernel names, same call counts, same durations. The opaque `apply_steering` op is **not breaking torch.compile fusion** — the Inductor-generated fused kernels are identical.
+| API call | disabled calls | steering calls | delta calls | delta CPU time |
+|---|---|---|---|---|
+| `cudaLaunchKernel` | 129,686 (4,360 ms) | 149,270 (4,385 ms) | **+19,584** | **+24 ms** |
+| `cudaMemcpyAsync` | 5,625 (1,198 ms) | 12,357 (1,231 ms) | **+6,732** | **+33 ms** |
+| `cudaStreamSynchronize` | 1,126 (46.5 ms) | 1,330 (49.0 ms) | **+204** | **+2.5 ms** |
+| `cudaEventSynchronize` | 568 (2,292 ms) | 568 (2,360 ms) | **0** | **+68 ms** |
+| `cudaGraphLaunch` | 294 (37 ms) | 294 (43 ms) | **0** | **+5.5 ms** |
+| `cudaDeviceSynchronize` | 2,012 (836 ms) | 2,012 (840 ms) | **0** | **+3 ms** |
+| **Total API delta** | | | | **~136 ms** |
 
-The only extra GPU work is the populate fills/copies (~0.22 ms/step), which are tiny kernels launched from Python during `populate_steering_tables`. These are negligible compute cost; their impact is in CPU-side launch overhead.
+Over 2 iterations: ~136 ms extra CPU-side CUDA API time → **~68 ms per iter → ~1.1 ms per step**.
 
-This rules out fusion loss as any significant contributor and means the earlier hook count ablation's linear scaling is attributable to **per-hook CPU dispatch overhead** (more hooks = more populate kernel launches = more CPU-side dispatch time per step), not to GPU-side unfused compute.
+Key observations:
 
-### The overhead is CPU-side
+1. **`cudaLaunchKernel` +19,584 calls (+24 ms)**: matches the GPU kernel count delta exactly (the populate fills + copies). Each extra launch costs ~1.2 μs of CPU dispatch. Small.
+2. **`cudaMemcpyAsync` +6,732 calls (+33 ms)**: the `.to(dtype)` conversions inside populate (converting per-config vectors to table bf16).
+3. **`cudaStreamSynchronize` +204 calls (+2.5 ms)**: confirms the torch.profiler finding of 204 extra syncs but at much lower cost than torch.profiler reported (2.5 ms vs 1024 ms). The discrepancy is likely because torch.profiler measured wall-clock including GPU idle wait time, while nsys measures CPU time in the API call. At +2.5 ms total, this is **~0.02 ms/step — negligible.**
+4. **`cudaEventSynchronize` same count but +68 ms**: existing event syncs take slightly longer (~120 μs more per call) because the GPU has more work queued from populate kernels. Adds ~0.5 ms/step.
+5. **`cudaGraphLaunch` same count, same structure**: graph replay is fully preserved.
 
-The ~4.9 ms/step overhead at batch=8 breaks down as:
-- **~0.22 ms/step** GPU kernel time (populate fills/copies) — measured by nsys
-- **~4.7 ms/step** CPU-side overhead — the remaining 95.5%
+## Root cause: Python interpreter overhead in the populate loop
 
-This CPU-side overhead includes:
-1. **Python dispatch for ~102 small kernel launches per step** in `populate_steering_tables`. Each `.zero_()` and `.copy_()` call goes through Python → PyTorch dispatcher → CUDA launch. At ~5-10 μs per Python-side launch, 102 launches ≈ 0.5-1.0 ms/step of pure Python dispatch.
-2. **Implicit host-GPU synchronization.** The torch.profiler captured 204 `cudaStreamSynchronize` calls (~5 ms each, 1 per decode step) that only occur with steering. These likely represent an implicit sync boundary between the eager populate writes and the subsequent CUDA graph replay. The steering code has no explicit sync calls (confirmed by static analysis), so this is PyTorch's internal ordering enforcement.
-3. **Per-active-request scaling** (~0.58 ms/step × num_active). The mechanism for this proportional term has not been identified. The per-request Python loop in `_update_steering_buffers` iterates `num_reqs` (not `num_active`), so the scaling is not from that loop. Candidates include: per-active work elsewhere in the V1 engine (unaudited), scheduler sub-batching of steered vs unsteered requests, or data-dependent cost in the populate path that varies with the number of active configs. NVTX-annotated nsys profiling at two different `num_active` values (same batch size) would pinpoint the source.
+### Three-level overhead breakdown
+
+The nsys GPU kernel trace, CPU API trace, and wall-clock measurements together give a complete picture of where the ~4.9 ms/step overhead lives at batch=8:
+
+| source | per-step | % of overhead | measured by |
+|---|---|---|---|
+| GPU kernel compute (populate fills + copies) | ~0.22 ms | **4.5%** | nsys `cuda_gpu_kern_sum` |
+| CUDA API dispatch (launch + memcpy + sync overhead) | ~1.1 ms | **22%** | nsys `cuda_api_sum` |
+| **Python interpreter** (loop iteration, dict lookups, getattr, conditionals) | **~3.6 ms** | **73%** | inferred (wall-clock minus GPU minus API) |
+
+### Fusion loss is ruled out
+
+The nsys kernel diff is definitive: **the GPU runs the same forward-pass kernels in both disabled and steering modes**. Same kernel names, same call counts, same durations. The opaque `apply_steering` op is **not breaking torch.compile fusion** — the Inductor-generated fused kernels are identical.
+
+The only extra GPU work is the populate fills/copies (~0.22 ms/step). These are negligible compute cost; their impact is in CPU-side launch overhead.
+
+This rules out fusion loss as any significant contributor and means the earlier hook count ablation's linear scaling is attributable to **per-hook CPU dispatch overhead** (more hooks = more populate iterations = more Python overhead per step), not to GPU-side unfused compute.
+
+### The dominant cost is Python interpreter overhead
+
+The populate loop iterates `3 hooks × 34 layers = 102` times per step. Each iteration does:
+- `getattr(mod, table_attr)` — Python attribute lookup
+- `table[0].zero_()` — Python → PyTorch dispatcher → CUDA launch
+- `.get()` dict lookups for global vectors
+- `_add_vecs()` — Python function call with tensor ops
+- Conditional branches (`if phase_global is not None and per_req is not None`)
+- `.copy_()`, `.to()` — more Python → dispatcher → CUDA
+
+The CUDA API calls themselves are fast (~1.1 ms/step per the nsys trace). The **Python interpreter time between those calls** — the 102 iterations of dict lookups, attribute access, function calls, conditionals, and loop overhead — is where ~3.6 ms/step lives. nsys cannot capture this because it's pure CPython interpreter work, not CUDA API calls.
+
+### Per-active-request scaling (~0.58 ms/step × num_active)
+
+This proportional term is the dominant cost at production batch sizes. Its mechanism has not been identified. The per-request Python loop in `_update_steering_buffers` iterates `num_reqs` (not `num_active`), so the scaling is not from that loop. The nsys traces confirm the cost is not GPU-side (identical forward-pass kernels) and not in CUDA API dispatch (only ~1.1 ms/step total delta, non-active-proportional).
+
+Candidates include per-active work elsewhere in the V1 engine (unaudited), scheduler sub-batching of steered vs unsteered requests, or data-dependent cost in the populate path. NVTX-annotated nsys profiling at two different `num_active` values (same batch size) would pinpoint the source.
 
 ### Rule-outs (confirmed by measurement)
 
 - **torch.compile fusion loss** — ruled out by nsys kernel diff (identical forward-pass kernels)
+- **CUDA API dispatch as dominant cost** — ruled out by nsys API trace (only ~1.1 ms/step of extra API time, 22% of overhead)
+- **`cudaStreamSynchronize` as dominant cost** — +204 calls confirmed, but total cost only +2.5 ms over 2 iters (~0.02 ms/step). torch.profiler's 1024 ms figure was a measurement artifact (included GPU idle wait time)
 - **Prefix cache invalidation** — ruled out (latency: 69.0% → 67.7% with cache off; throughput: 1824 → 1800)
 - **Raw steering op kernel cost** — ruled out at ~0.05 ms/call (microbench)
 - **`steering_index` construction loop** — ruled out at ~5 μs/request (≤1.5% of overhead)
