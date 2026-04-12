@@ -598,7 +598,7 @@ def plot_hook_points(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
 
 
 def plot_config_scaling(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
-    """Latency and memory vs max_steering_configs."""
+    """Latency vs max_steering_configs. Memory overlay if data is usable."""
     data = df[df["benchmark"] == "ablation.config_scaling"].copy()
     if data.empty:
         return
@@ -612,7 +612,24 @@ def plot_config_scaling(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
     lat_p90 = data.get(
         "result_latency_ms_p90_ms", pd.Series([np.nan] * len(data))
     ).values
+
+    # Memory overlay is only meaningful if values vary and aren't all zeros.
+    # Early runs of bench_config_scaling.py used torch.cuda.memory_allocated()
+    # which returns 0 for the vLLM subprocess; those runs record zeros that
+    # would plot as a meaningless flat line. Skip the memory overlay in that
+    # case. Also skip if all allocated_mb values are equal (a constant line
+    # from KV cache dominating at gpu_memory_utilization=0.9).
     memory = data.get("result_allocated_mb")
+    show_memory = False
+    memory_vals = None
+    if memory is not None and not memory.isna().all():
+        memory_vals = memory.values
+        nonzero = memory_vals[~np.isnan(memory_vals)]
+        if len(nonzero) >= 2:
+            spread = nonzero.max() - nonzero.min()
+            # Require nonzero values and some meaningful variation (>1 MB)
+            # so a flat line at ~20 GB from KV cache allocation gets skipped too.
+            show_memory = bool((nonzero > 0).any() and spread > 1.0)
 
     fig, ax1 = plt.subplots()
     ax1.plot(
@@ -625,11 +642,11 @@ def plot_config_scaling(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
     ax1.tick_params(axis="y", labelcolor="#2196F3")
     ax1.set_xscale("log", base=2)
 
-    if memory is not None and not memory.isna().all():
+    if show_memory:
         ax2 = ax1.twinx()
         ax2.plot(
             configs,
-            memory.values,
+            memory_vals,
             "s--",
             color="#F44336",
             label="GPU memory",
@@ -638,8 +655,11 @@ def plot_config_scaling(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
         )
         ax2.set_ylabel("Memory (MB)", color="#F44336")
         ax2.tick_params(axis="y", labelcolor="#F44336")
+        title = "Config scaling: latency & memory vs max_steering_configs"
+    else:
+        title = "Config scaling: latency vs max_steering_configs"
 
-    ax1.set_title("Config scaling: latency & memory vs max_steering_configs")
+    ax1.set_title(title)
     fig.legend(loc="upper left", bbox_to_anchor=(0.12, 0.88))
     _save(fig, output_dir / f"config_scaling.{fmt}", f"config_scaling.{fmt}")
 
