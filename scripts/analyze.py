@@ -314,10 +314,19 @@ def _loss_heatmap(
 
 
 def plot_throughput_matrix(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
-    """Throughput matrix benchmark: 4 plots covering latency and throughput."""
+    """Throughput matrix benchmark: 4 plots covering latency and throughput.
+
+    Emits one set of 4 files per distinct ``tag`` value found in the data.
+    With a single tag (or no tag), file names are ``matrix_*.{fmt}``.
+    With multiple tags, file names are ``matrix_*_<tag>.{fmt}`` so each
+    set can be placed independently in the article.
+    """
     data = df[df["benchmark"] == "vllm.throughput_matrix"].copy()
     if data.empty:
         return
+
+    if "tag" not in data.columns:
+        data["tag"] = ""
 
     mode_order = [
         "disabled",
@@ -327,108 +336,346 @@ def plot_throughput_matrix(df: pd.DataFrame, output_dir: Path, fmt: str) -> None
         "mixed_75",
         "all_steered",
     ]
-    batch_sizes = sorted(data["param_batch_size"].dropna().unique())
-    if not batch_sizes:
+
+    all_tags = sorted(data["tag"].fillna("").unique(), key=lambda t: (t != "", t))
+    tag_groups = [
+        (tag, data[data["tag"].fillna("") == tag])
+        for tag in all_tags
+    ]
+    tag_groups = [(t, g) for t, g in tag_groups if not g.empty]
+
+    if not tag_groups:
         return
 
-    modes_present = [m for m in mode_order if not data[data["param_mode"] == m].empty]
+    multiple_tags = len(tag_groups) > 1
 
-    # 1. Throughput grouped bars
-    _grouped_bars(
-        data,
-        modes_present,
-        batch_sizes,
-        metric="throughput",
-        ylabel="Throughput (tokens/sec)",
-        title="Throughput matrix: mode × batch_size",
-        output_path=output_dir / f"matrix_throughput_bars.{fmt}",
-        name=f"matrix_throughput_bars.{fmt}",
-    )
+    for tag, tag_data in tag_groups:
+        batch_sizes = sorted(tag_data["param_batch_size"].dropna().unique())
+        if not batch_sizes:
+            continue
 
-    # 2. Throughput loss heatmap
-    _loss_heatmap(
-        data,
-        modes_present,
-        batch_sizes,
-        metric="throughput",
-        label="throughput loss (%)",
-        title="Throughput loss (%) vs disabled",
-        output_path=output_dir / f"matrix_throughput_heatmap.{fmt}",
-        name=f"matrix_throughput_heatmap.{fmt}",
-    )
+        modes_present = [
+            m for m in mode_order if not tag_data[tag_data["param_mode"] == m].empty
+        ]
 
-    # 3. Latency grouped bars
-    _grouped_bars(
-        data,
-        modes_present,
-        batch_sizes,
-        metric="latency",
-        ylabel="Latency (ms)",
-        title="Latency matrix: mode × batch_size",
-        output_path=output_dir / f"matrix_latency_bars.{fmt}",
-        name=f"matrix_latency_bars.{fmt}",
-    )
+        if multiple_tags:
+            safe_tag = (tag or "untagged").replace("/", "_").replace(" ", "_")
+            suffix = f"_{safe_tag}"
+        else:
+            suffix = ""
 
-    # 4. Latency overhead heatmap
-    _loss_heatmap(
-        data,
-        modes_present,
-        batch_sizes,
-        metric="latency",
-        label="latency overhead (%)",
-        title="Latency overhead (%) vs disabled",
-        output_path=output_dir / f"matrix_latency_heatmap.{fmt}",
-        name=f"matrix_latency_heatmap.{fmt}",
-    )
+        # 1. Throughput grouped bars
+        _grouped_bars(
+            tag_data,
+            modes_present,
+            batch_sizes,
+            metric="throughput",
+            ylabel="Throughput (tokens/sec)",
+            title="Throughput matrix: mode × batch_size",
+            output_path=output_dir / f"matrix_throughput_bars{suffix}.{fmt}",
+            name=f"matrix_throughput_bars{suffix}.{fmt}",
+        )
+
+        # 2. Throughput loss heatmap
+        _loss_heatmap(
+            tag_data,
+            modes_present,
+            batch_sizes,
+            metric="throughput",
+            label="throughput loss (%)",
+            title="Throughput loss (%) vs disabled",
+            output_path=output_dir / f"matrix_throughput_heatmap{suffix}.{fmt}",
+            name=f"matrix_throughput_heatmap{suffix}.{fmt}",
+        )
+
+        # 3. Latency grouped bars
+        _grouped_bars(
+            tag_data,
+            modes_present,
+            batch_sizes,
+            metric="latency",
+            ylabel="Latency (ms)",
+            title="Latency matrix: mode × batch_size",
+            output_path=output_dir / f"matrix_latency_bars{suffix}.{fmt}",
+            name=f"matrix_latency_bars{suffix}.{fmt}",
+        )
+
+        # 4. Latency overhead heatmap
+        _loss_heatmap(
+            tag_data,
+            modes_present,
+            batch_sizes,
+            metric="latency",
+            label="latency overhead (%)",
+            title="Latency overhead (%) vs disabled",
+            output_path=output_dir / f"matrix_latency_heatmap{suffix}.{fmt}",
+            name=f"matrix_latency_heatmap{suffix}.{fmt}",
+        )
 
 
 # ── Mixed batch (proportional scaling) ────────────────────────────────────────
 
 
+def plot_max_tokens_sweep(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
+    """Per-step latency vs max_tokens, one line per num_active.
+
+    Demonstrates that the per-step overhead converges to the populate floor
+    as max_tokens grows. The submission-cost component scales as 1/max_tokens
+    while the populate component is constant per step, so each curve looks
+    like ``floor + per_active_submission * num_active / max_tokens``.
+
+    The n=0 (idle) line is the floor; higher num_active lines start above
+    the floor at small max_tokens and converge to it as max_tokens grows.
+
+    Emits one file per distinct ``tag`` value found in the data. With a
+    single tag (or no tag), output is ``max_tokens_sweep.{fmt}``. With
+    multiple tags, output is ``max_tokens_sweep_<tag>.{fmt}``.
+    """
+    data = df[df["benchmark"] == "vllm.max_tokens_sweep"].copy()
+    if data.empty:
+        return
+
+    if "param_max_tokens" not in data.columns or "param_num_active" not in data.columns:
+        return
+
+    data = data.dropna(subset=["param_max_tokens", "param_num_active"])
+    if data.empty:
+        return
+
+    if "tag" not in data.columns:
+        data["tag"] = ""
+
+    # Compute per-step latency from the raw latency column. Some runs may
+    # already have a ``result_per_step_ms`` field; fall back to it if so.
+    if "result_per_step_ms" in data.columns and data["result_per_step_ms"].notna().any():
+        data["per_step_ms"] = data["result_per_step_ms"]
+    else:
+        data["per_step_ms"] = data["result_latency_ms_mean_ms"] / data["param_max_tokens"]
+
+    all_tags = sorted(data["tag"].fillna("").unique(), key=lambda t: (t != "", t))
+    tag_groups = [
+        (tag, data[data["tag"].fillna("") == tag])
+        for tag in all_tags
+    ]
+    tag_groups = [(t, g) for t, g in tag_groups if not g.empty]
+
+    if not tag_groups:
+        return
+
+    multiple_tags = len(tag_groups) > 1
+
+    for tag, tag_data in tag_groups:
+        num_active_values = sorted(tag_data["param_num_active"].dropna().unique())
+        max_tokens_values = sorted(tag_data["param_max_tokens"].dropna().unique())
+        if not num_active_values or not max_tokens_values:
+            continue
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+        # Left panel: per-step latency vs max_tokens (the main "convergence" plot)
+        cmap = plt.get_cmap("viridis")
+        for i, n in enumerate(num_active_values):
+            sub = (
+                tag_data[tag_data["param_num_active"] == n]
+                .sort_values("param_max_tokens")
+            )
+            if sub.empty:
+                continue
+            color = cmap(i / max(1, len(num_active_values) - 1))
+            label = f"num_active={int(n)}"
+            axes[0].plot(
+                sub["param_max_tokens"].values,
+                sub["per_step_ms"].values,
+                "o-",
+                color=color,
+                label=label,
+                linewidth=2,
+                markersize=7,
+            )
+
+        axes[0].set_xscale("log", base=2)
+        axes[0].set_xlabel("max_tokens")
+        axes[0].set_ylabel("Per-step latency (ms)")
+        axes[0].set_title(
+            "Per-step latency vs max_tokens\n"
+            "(submission cost amortizes as outputs grow)"
+        )
+        axes[0].grid(True, alpha=0.3)
+        axes[0].legend(title="active steered", loc="best")
+
+        # Right panel: overhead vs idle (n=0) baseline as a percentage
+        if 0 in num_active_values:
+            idle = (
+                tag_data[tag_data["param_num_active"] == 0]
+                .set_index("param_max_tokens")["per_step_ms"]
+            )
+            for i, n in enumerate(num_active_values):
+                if n == 0:
+                    continue
+                sub = (
+                    tag_data[tag_data["param_num_active"] == n]
+                    .sort_values("param_max_tokens")
+                    .copy()
+                )
+                sub["overhead_pct"] = (
+                    100.0
+                    * (
+                        sub["per_step_ms"].values
+                        - idle.reindex(sub["param_max_tokens"]).values
+                    )
+                    / idle.reindex(sub["param_max_tokens"]).values
+                )
+                color = cmap(i / max(1, len(num_active_values) - 1))
+                axes[1].plot(
+                    sub["param_max_tokens"].values,
+                    sub["overhead_pct"].values,
+                    "o-",
+                    color=color,
+                    label=f"num_active={int(n)}",
+                    linewidth=2,
+                    markersize=7,
+                )
+            axes[1].set_xscale("log", base=2)
+            axes[1].set_xlabel("max_tokens")
+            axes[1].set_ylabel("Per-step overhead vs idle (%)")
+            axes[1].set_title(
+                "Steering overhead %\n"
+                "(decays toward 0 as max_tokens grows)"
+            )
+            axes[1].grid(True, alpha=0.3)
+            axes[1].axhline(0, color="black", linewidth=0.5, alpha=0.5)
+            axes[1].legend(title="active steered", loc="best")
+        else:
+            axes[1].text(
+                0.5,
+                0.5,
+                "n=0 baseline missing\n(re-run with --num-active-list including 0)",
+                ha="center",
+                va="center",
+                transform=axes[1].transAxes,
+            )
+
+        fig.tight_layout()
+
+        if multiple_tags:
+            safe_tag = (tag or "untagged").replace("/", "_").replace(" ", "_")
+            filename = f"max_tokens_sweep_{safe_tag}.{fmt}"
+        else:
+            filename = f"max_tokens_sweep.{fmt}"
+
+        _save(fig, output_dir / filename, filename)
+
+
 def plot_mixed_batch(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
-    """Mixed batch: latency and throughput vs num_active within a fixed batch size."""
+    """Mixed batch: latency and throughput vs num_active within a fixed batch size.
+
+    Emits one file per distinct ``tag`` value found in the data. With a
+    single tag (or no tag), output is ``mixed_batch.{fmt}``. With multiple
+    tags, output is ``mixed_batch_<tag>.{fmt}``, one per tag, so the article
+    can place them wherever it likes without being locked into a multi-panel
+    layout.
+    """
     data = df[df["benchmark"] == "vllm.mixed_batch"].copy()
     if data.empty:
         return
 
-    # Group by batch_size; one line per batch size
-    batch_sizes = sorted(data["param_batch_size"].dropna().unique())
-    if not batch_sizes:
+    if "tag" not in data.columns:
+        data["tag"] = ""
+
+    # Distinct tags, in a stable order. Empty tag sorts first; otherwise
+    # alphabetical. Drop any tag with zero records.
+    all_tags = sorted(data["tag"].fillna("").unique(), key=lambda t: (t != "", t))
+    tag_groups = [
+        (tag, data[data["tag"].fillna("") == tag])
+        for tag in all_tags
+    ]
+    tag_groups = [(t, g) for t, g in tag_groups if not g.empty]
+
+    if not tag_groups:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    multiple_tags = len(tag_groups) > 1
 
-    for bs in batch_sizes:
-        bs_data = data[data["param_batch_size"] == bs].sort_values("param_num_active")
-        x = bs_data["param_num_active"].values
-        lat = bs_data["result_latency_ms_mean_ms"].values
-        tps = [_tps_field(r) for _, r in bs_data.iterrows()]
-        label = f"batch={int(bs)}"
-        axes[0].plot(x, lat, "o-", label=label, linewidth=2, markersize=6)
-        axes[1].plot(x, tps, "o-", label=label, linewidth=2, markersize=6)
+    for tag, tag_data in tag_groups:
+        batch_sizes = sorted(tag_data["param_batch_size"].dropna().unique())
+        if not batch_sizes:
+            continue
 
-    axes[0].set_xlabel("Number of steered requests in batch")
-    axes[0].set_ylabel("Batch latency (ms)")
-    axes[0].set_title("Mixed-batch latency: proportional to active count")
-    axes[0].legend()
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    axes[1].set_xlabel("Number of steered requests in batch")
-    axes[1].set_ylabel("Throughput (tokens/sec)")
-    axes[1].set_title("Mixed-batch throughput: proportional to active count")
-    axes[1].legend()
+        for bs in batch_sizes:
+            bs_data = (
+                tag_data[tag_data["param_batch_size"] == bs]
+                .sort_values("param_num_active")
+            )
+            x = bs_data["param_num_active"].values
+            lat = bs_data["result_latency_ms_mean_ms"].values
+            tps = [_tps_field(r) for _, r in bs_data.iterrows()]
+            label = f"batch={int(bs)}"
+            axes[0].plot(x, lat, "o-", label=label, linewidth=2, markersize=6)
+            axes[1].plot(x, tps, "o-", label=label, linewidth=2, markersize=6)
 
-    _save(fig, output_dir / f"mixed_batch.{fmt}", f"mixed_batch.{fmt}")
+        axes[0].set_xlabel("Number of steered requests in batch")
+        axes[0].set_ylabel("Batch latency (ms)")
+        axes[0].set_title("Mixed-batch latency: proportional to active count")
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].set_xlabel("Number of steered requests in batch")
+        axes[1].set_ylabel("Throughput (tokens/sec)")
+        axes[1].set_title("Mixed-batch throughput: proportional to active count")
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+
+        fig.tight_layout()
+
+        # File naming: include tag suffix only when there are multiple tags
+        # so single-tag runs produce the conventional ``mixed_batch.png``.
+        if multiple_tags:
+            safe_tag = tag if tag else "untagged"
+            # Replace path-unfriendly characters
+            safe_tag = safe_tag.replace("/", "_").replace(" ", "_")
+            filename = f"mixed_batch_{safe_tag}.{fmt}"
+        else:
+            filename = f"mixed_batch.{fmt}"
+
+        _save(fig, output_dir / filename, filename)
 
 
 # ── Table sizing (max_cfg × batch × distinct) ─────────────────────────────────
 
 
 def plot_table_sizing(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
-    """Table sizing: throughput loss vs distinct, with max_cfg as line per panel."""
-    data = df[df["benchmark"] == "vllm.table_sizing"].copy()
-    if data.empty:
+    """Table sizing: throughput loss vs distinct, with max_cfg as line per panel.
+
+    Splits by tag so a refresh under a new tag (e.g. ``postfix-populate``)
+    doesn't get layered on top of the old run in the same chart.
+    """
+    all_data = df[df["benchmark"] == "vllm.table_sizing"].copy()
+    if all_data.empty:
         return
 
+    all_tags = sorted(all_data["tag"].fillna("").unique(), key=lambda t: (t != "", t))
+    tag_groups = [
+        (tag, all_data[all_data["tag"].fillna("") == tag]) for tag in all_tags
+    ]
+    tag_groups = [(t, g) for t, g in tag_groups if not g.empty]
+    if not tag_groups:
+        return
+    multiple_tags = len(tag_groups) > 1
+
+    for tag, data in tag_groups:
+        if multiple_tags:
+            safe_tag = (tag or "untagged").replace("/", "_").replace(" ", "_")
+            suffix = f"_{safe_tag}"
+        else:
+            suffix = ""
+        _plot_table_sizing_one(data, output_dir, fmt, suffix)
+
+
+def _plot_table_sizing_one(
+    data: pd.DataFrame, output_dir: Path, fmt: str, suffix: str
+) -> None:
     # Baselines: mode=disabled rows (max_steering_configs=0)
     baseline_rows = data[data["param_mode"] == "disabled"]
     disabled_tps: dict[float, float] = {}
@@ -505,7 +752,11 @@ def plot_table_sizing(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
         "Table sizing: throughput loss vs distinct configs, per batch size",
         fontsize=13,
     )
-    _save(fig, output_dir / f"table_sizing_throughput.{fmt}", f"table_sizing_throughput.{fmt}")
+    _save(
+        fig,
+        output_dir / f"table_sizing_throughput{suffix}.{fmt}",
+        f"table_sizing_throughput{suffix}.{fmt}",
+    )
 
     # ── Latency overhead % panels ───────────────────────────────────────────
     fig, axes = plt.subplots(1, len(batch_sizes), figsize=(5 * len(batch_sizes), 5), sharey=True)
@@ -552,7 +803,11 @@ def plot_table_sizing(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
         "Table sizing: latency overhead vs distinct configs, per batch size",
         fontsize=13,
     )
-    _save(fig, output_dir / f"table_sizing_latency.{fmt}", f"table_sizing_latency.{fmt}")
+    _save(
+        fig,
+        output_dir / f"table_sizing_latency{suffix}.{fmt}",
+        f"table_sizing_latency{suffix}.{fmt}",
+    )
 
 
 # ── Memory ────────────────────────────────────────────────────────────────────
@@ -1021,24 +1276,32 @@ def print_text_summary(df: pd.DataFrame) -> None:
     # Mixed batch
     mixed = df[df["benchmark"] == "vllm.mixed_batch"]
     if not mixed.empty:
-        print("\n  Mixed-batch cost per active request:")
+        print("\n  Mixed-batch cost per active request (slope from num_active>0 points):")
         for bs in sorted(mixed["param_batch_size"].dropna().unique()):
-            rows = mixed[mixed["param_batch_size"] == bs].sort_values("param_num_active")
+            # Use only non-zero num_active points so the slope reflects the
+            # marginal cost of an extra active request, not the discrete jump
+            # from the disabled-mode baseline (which is dominated by table
+            # population fixed cost).
+            rows = (
+                mixed[
+                    (mixed["param_batch_size"] == bs)
+                    & (mixed["param_num_active"] > 0)
+                ]
+                .sort_values("param_num_active")
+            )
             if len(rows) < 2:
                 continue
-            first = rows.iloc[0]
-            last = rows.iloc[-1]
-            delta_n = last["param_num_active"] - first["param_num_active"]
-            delta_lat = (
-                last["result_latency_ms_mean_ms"] - first["result_latency_ms_mean_ms"]
+            xs = rows["param_num_active"].astype(float).to_numpy()
+            ys = rows["result_latency_ms_mean_ms"].astype(float).to_numpy()
+            # Linear least-squares slope (ms per additional active request)
+            slope, intercept = np.polyfit(xs, ys, 1)
+            n_lo = int(xs.min())
+            n_hi = int(xs.max())
+            print(
+                f"    batch={int(bs)}: ~{slope:.1f} ms per additional active "
+                f"request (linear fit over n={n_lo}..{n_hi}, "
+                f"{len(rows)} points)"
             )
-            if delta_n > 0:
-                per_req_cost = delta_lat / delta_n
-                print(
-                    f"    batch={int(bs)}: ~{per_req_cost:.1f} ms per additional "
-                    f"active request (n={int(first['param_num_active'])} → "
-                    f"{int(last['param_num_active'])})"
-                )
 
     # Throughput matrix
     tmat = df[df["benchmark"] == "vllm.throughput_matrix"]
@@ -1209,6 +1472,7 @@ def main():
     plot_throughput_by_configs(df, output_dir, args.format)
     plot_throughput_matrix(df, output_dir, args.format)
     plot_mixed_batch(df, output_dir, args.format)
+    plot_max_tokens_sweep(df, output_dir, args.format)
     plot_table_sizing(df, output_dir, args.format)
     plot_memory_scaling(df, output_dir, args.format)
 

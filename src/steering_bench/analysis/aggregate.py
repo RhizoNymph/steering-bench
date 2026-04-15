@@ -109,19 +109,40 @@ def compute_derived(df: pd.DataFrame) -> pd.DataFrame:
     latency_mask = df["benchmark"] == "vllm.latency"
     if latency_mask.any():
         latency_df = df[latency_mask].copy()
-        # Get baseline (disabled mode) mean per batch_size
-        baseline = latency_df[latency_df["param_mode"] == "disabled"].set_index(
-            "param_batch_size"
-        )["result_latency_ms_mean_ms"]
+        # Build per-(tag, batch_size) baselines from the disabled-mode rows so
+        # multiple tagged runs in the same results dir (e.g. pre-fix vs
+        # post-fix) compute overhead against their own same-tag baseline
+        # instead of colliding in a single index.
+        tag_col = "tag" if "tag" in latency_df.columns else None
+        disabled_df = latency_df[latency_df["param_mode"] == "disabled"]
+        if tag_col is not None:
+            baseline_group = disabled_df.groupby(
+                [tag_col, "param_batch_size"]
+            )["result_latency_ms_mean_ms"].mean()
+        else:
+            baseline_group = disabled_df.groupby(
+                "param_batch_size"
+            )["result_latency_ms_mean_ms"].mean()
 
         def calc_overhead(row):
             bs = row.get("param_batch_size")
             mean = row.get("result_latency_ms_mean_ms")
-            if bs in baseline.index and baseline[bs] > 0 and pd.notna(mean):
-                return (mean - baseline[bs]) / baseline[bs] * 100
-            return None
+            if pd.isna(bs) or pd.isna(mean):
+                return None
+            if tag_col is not None:
+                key = (row.get(tag_col, ""), bs)
+            else:
+                key = bs
+            if key not in baseline_group.index:
+                return None
+            base = baseline_group[key]
+            if base <= 0:
+                return None
+            return (mean - base) / base * 100
 
-        df.loc[latency_mask, "derived_overhead_pct"] = latency_df.apply(calc_overhead, axis=1)
+        df.loc[latency_mask, "derived_overhead_pct"] = latency_df.apply(
+            calc_overhead, axis=1
+        )
 
     # --- External library speedup vs HF baseline ---
     tier1_mask = df["benchmark"].str.startswith("external.tier1.")

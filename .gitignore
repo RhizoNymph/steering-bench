@@ -27,3 +27,10 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+*.sqlite
+*.nsys-rep
+*.json.gz
+*.txt
+
+.claude/
