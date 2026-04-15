@@ -312,6 +312,7 @@ if [[ "$DO_4B" == "1" ]]; then
         --concurrency 16 \
         --max-tokens 256 \
         --max-steering-configs 16 \
+        --startup-timeout 600 \
         "${SHARED_SERVING_ARGS[@]}"
   fi
 fi
@@ -370,6 +371,7 @@ if [[ "$DO_27B" == "1" ]]; then
         --max-model-len 4096 \
         --gpu-memory-utilization 0.92 \
         --max-steering-configs 16 \
+        --startup-timeout 900 \
         "${SHARED_SERVING_ARGS[@]}"
   fi
 fi
