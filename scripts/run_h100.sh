@@ -202,10 +202,70 @@ if [[ "$DO_4B" == "1" ]]; then
         --output-dir "$OUT/vllm/" --tag "$TAG" \
         --warmup "$RFC_WARMUP" --iters "$RFC_ITERS"
 
-    run_step "4B mixed_batch" \
+    run_step "4B mixed_batch bs=16 (matches 3090 data)" \
       "$PY" scripts/bench_mixed_batch.py \
         --model "$MODEL_SMALL" \
         --output-dir "$OUT/vllm/" --tag "$TAG"
+
+    # ─── LARGE-BATCH distinct-config scaling ───────────────────────────
+    # Blog's BS=512 N=512 weakness: 27% "submission overhead" at scale.
+    # The RFC rebuttal is: "overhead scales with distinct configs, not
+    # with batch size, and production workloads have N ≪ BS." These
+    # runs prove it by sweeping batch size with --distinct-vectors
+    # (each request gets its own unique config — the worst case).
+    # At each batch size, bench_mixed_batch itself sweeps num_active
+    # ∈ {0, 1, bs/4, bs/2, bs}, so we get a full curve per size.
+
+    run_step "4B mixed_batch bs=64 distinct (per-request worst case)" \
+      "$PY" scripts/bench_mixed_batch.py \
+        --model "$MODEL_SMALL" \
+        --output-dir "$OUT/vllm/" --tag "$TAG" \
+        --batch-size 64 --distinct-vectors \
+        --max-num-seqs 64 \
+        --gpu-memory-utilization 0.85
+
+    run_step "4B mixed_batch bs=128 distinct" \
+      "$PY" scripts/bench_mixed_batch.py \
+        --model "$MODEL_SMALL" \
+        --output-dir "$OUT/vllm/" --tag "$TAG" \
+        --batch-size 128 --distinct-vectors \
+        --max-num-seqs 128 \
+        --gpu-memory-utilization 0.85
+
+    run_step "4B mixed_batch bs=256 distinct (direct refutation)" \
+      "$PY" scripts/bench_mixed_batch.py \
+        --model "$MODEL_SMALL" \
+        --output-dir "$OUT/vllm/" --tag "$TAG" \
+        --batch-size 256 --distinct-vectors \
+        --max-num-seqs 256 \
+        --gpu-memory-utilization 0.85
+
+    # BS=384: 75% scale of the blog's BS=512 claim. Opt in via DO_4B_BS384=1
+    # (default off because it's the most memory-hungry and needs smoke-test
+    # confirmation first). If this runs cleanly, the chart is "measured
+    # N=384 on H100 NVL, extrapolated to 512" instead of "extrapolated
+    # from 256."
+    if [[ "${DO_4B_BS384:-0}" == "1" ]]; then
+      run_step "4B mixed_batch bs=384 distinct (blog worst case)" \
+        "$PY" scripts/bench_mixed_batch.py \
+          --model "$MODEL_SMALL" \
+          --output-dir "$OUT/vllm/" --tag "$TAG" \
+          --batch-size 384 --distinct-vectors \
+          --max-num-seqs 384 \
+          --gpu-memory-utilization 0.90
+    fi
+
+    # Shared-vector counterpart at BS=128 — same batch size, 1 distinct
+    # config. Juxtaposed with the distinct BS=128 run above, this is the
+    # single chart that proves: overhead is about distinct configs, not
+    # about batch size. Shared should be near-zero; distinct should scale.
+    run_step "4B mixed_batch bs=128 shared (N=1 baseline for comparison)" \
+      "$PY" scripts/bench_mixed_batch.py \
+        --model "$MODEL_SMALL" \
+        --output-dir "$OUT/vllm/" --tag "$TAG" \
+        --batch-size 128 \
+        --max-num-seqs 128 \
+        --gpu-memory-utilization 0.85
 
     run_step "4B max_tokens sweep" \
       "$PY" scripts/bench_max_tokens.py \

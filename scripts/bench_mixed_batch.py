@@ -57,6 +57,7 @@ def run_mixed(
     distinct_vectors: bool = False,
     max_steering_configs: int = 4,
     gpu_memory_utilization: float = 0.9,
+    max_num_seqs: int | None = None,
 ) -> dict:
     """Run a mixed batch: num_active of batch_size requests are steered.
 
@@ -74,13 +75,16 @@ def run_mixed(
         f"distinct={distinct_vectors})...",
         flush=True,
     )
-    llm = LLM(
+    llm_kwargs: dict = dict(
         model=model,
         enable_steering=True,
         max_steering_configs=max_steering_configs,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=2048,
     )
+    if max_num_seqs is not None:
+        llm_kwargs["max_num_seqs"] = max_num_seqs
+    llm = LLM(**llm_kwargs)
 
     prompts = make_prompts(batch_size, prompt_len)
 
@@ -220,6 +224,17 @@ def main():
             "--gpu-memory-utilization isn't enough."
         ),
     )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=None,
+        help=(
+            "Passed through to LLM(). vLLM's default max_num_seqs is 256, "
+            "which caps concurrent requests even when --batch-size is larger. "
+            "Set this to at least --batch-size when running BS > 256. "
+            "Leave unset to use vLLM's default."
+        ),
+    )
     args = parser.parse_args()
 
     model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
@@ -280,6 +295,7 @@ def main():
                 distinct_vectors=args.distinct_vectors,
                 max_steering_configs=max_steering_configs,
                 gpu_memory_utilization=args.gpu_memory_utilization,
+                max_num_seqs=args.max_num_seqs,
             )
             mean_ms = result["latency"]["mean_ms"]
             p90_ms = result["latency"]["p90_ms"]
