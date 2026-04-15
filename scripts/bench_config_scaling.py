@@ -37,6 +37,8 @@ def _gpu_used_mb(device: int = 0) -> float:
 
 MODEL_CONFIGS = {
     "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
+    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
+    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
     "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
     "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
 }
