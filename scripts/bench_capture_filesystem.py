@@ -21,9 +21,11 @@ Metrics per sweep point:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gc
 import itertools
 import pathlib
+import shutil
 import sys
 import tempfile
 import threading
@@ -179,6 +181,16 @@ def main():
     parser.add_argument("--queue-size", type=int, default=4096)
     parser.add_argument("--output-dir", default="results/capture/")
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--bench-dir",
+        default=None,
+        help=(
+            "Directory on real disk to write benchmark data into. "
+            "Each run gets a cleaned-up subdirectory. "
+            "Omit to use a tmpfs temp dir (fast, but does not reflect "
+            "real SSD/HDD throughput)."
+        ),
+    )
     args = parser.parse_args()
 
     writer_threads_list = [int(x) for x in args.writer_threads.split(",")]
@@ -190,16 +202,33 @@ def main():
         len(writer_threads_list) * len(hidden_sizes)
         * len(num_requests_list) * len(steps_list)
     )
+    using_tmpfs = args.bench_dir is None
     print("ActivationWriter throughput benchmark")
     print(f"  writer_threads={writer_threads_list}, hidden_sizes={hidden_sizes}")
     print(f"  num_requests={num_requests_list}, steps={steps_list}")
     print(f"  total configs={total}")
+    if using_tmpfs:
+        print("  WARNING: writing to tmpfs (in-memory). Use --bench-dir for real disk I/O.")
+    else:
+        print(f"  bench_dir={args.bench_dir} (real disk)")
     print()
 
     all_results = []
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = pathlib.Path(tmpdir)
+    @contextlib.contextmanager
+    def _bench_root():
+        if using_tmpfs:
+            with tempfile.TemporaryDirectory() as d:
+                yield pathlib.Path(d)
+        else:
+            p = pathlib.Path(args.bench_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            try:
+                yield p
+            finally:
+                shutil.rmtree(p, ignore_errors=True)
+
+    with _bench_root() as root:
 
         for threads, hs, num_req, steps in itertools.product(
             writer_threads_list, hidden_sizes, num_requests_list, steps_list
@@ -247,6 +276,7 @@ def main():
         "queue_size": args.queue_size,
         "dtype": "float16",
         "rows_per_chunk": 1,
+        "bench_storage": "disk" if not using_tmpfs else "tmpfs",
     }
     write_result(
         benchmark="capture.filesystem",
