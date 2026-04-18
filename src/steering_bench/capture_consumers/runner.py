@@ -30,7 +30,24 @@ def make_llm(
     return LLM(model=model, capture_consumers=capture_consumers, **kwargs)
 
 
-def make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
+def make_prompts(
+    num_prompts: int,
+    prompt_len: int,
+    model: str | None = None,
+) -> list[str]:
+    """Generate ``num_prompts`` prompts of approximately ``prompt_len`` tokens.
+
+    When ``model`` is provided the prompt is tokenizer-exact: the model's
+    tokenizer is used to produce a string whose encoded length is exactly
+    ``prompt_len`` tokens (excluding BOS).  Without ``model`` a rough
+    words-based heuristic is used (1 word ≈ 1.3 tokens for English).
+    """
+    if model is not None:
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(model)
+        raw = "hello world " * (prompt_len * 4)
+        ids = tok.encode(raw, add_special_tokens=False)[:prompt_len]
+        prompt = tok.decode(ids)
+        return [prompt] * num_prompts
     words_needed = max(1, int(prompt_len / 1.3))
-    base = " ".join(["hello"] * words_needed)
-    return [base] * num_prompts
+    return [" ".join(["hello"] * words_needed)] * num_prompts

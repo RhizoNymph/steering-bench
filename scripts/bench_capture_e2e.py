@@ -70,7 +70,7 @@ def _run_config(
 ) -> dict:
     from vllm import LLM, SamplingParams
 
-    prompts = make_prompts(batch_size, prompt_len)
+    prompts = make_prompts(batch_size, prompt_len, model=model)
     sp = SamplingParams(max_tokens=output_len, temperature=0.0, **sampling_params_override)
     sp_list = [sp] * batch_size
 
@@ -202,7 +202,7 @@ def main():
     )
     parser.add_argument("--output-len", type=int, default=64)
     parser.add_argument("--prompt-len", type=int, default=64)
-    parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--warmup", type=int, default=4)
     parser.add_argument("--iters", type=int, default=5)
     parser.add_argument("--output-dir", default="results/capture/")
     parser.add_argument("--tag", default="")

@@ -127,6 +127,9 @@ def _run_one(
             t1 = time.perf_counter()
 
             # ── Phase 2: on_hook (GPU index_select)
+            # hook_ms = GPU kernel execution time only. The GPU→CPU copy of
+            # sliced activations happens in dispatch_step_captures (phase 3),
+            # not here, so dispatch_ms is where transfer cost appears.
             torch.cuda.synchronize()
             start_ev = torch.cuda.Event(enable_timing=True)
             end_ev = torch.cuda.Event(enable_timing=True)

@@ -115,10 +115,18 @@ def _run_one(
         ))
 
     # Wait for all finalizations.
-    done_event.wait(timeout=120.0)
+    completed_in_time = done_event.wait(timeout=120.0)
     t_end = time.perf_counter()
 
     writer.shutdown(timeout=30.0)
+
+    with count_lock:
+        actual_completed = finalized_count
+    if not completed_in_time:
+        raise RuntimeError(
+            f"Timed out: only {actual_completed}/{total_to_finalize} "
+            "finalizations completed within 120s"
+        )
 
     total_seconds = t_end - t_start
     total_chunks = num_requests * steps_per_request

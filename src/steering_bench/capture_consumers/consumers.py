@@ -14,8 +14,6 @@ from __future__ import annotations
 import threading
 from typing import Any, ClassVar, Literal
 
-import torch
-
 from vllm.v1.capture.consumer import CaptureConsumer
 from vllm.v1.capture.types import (
     CaptureChunk,
@@ -65,11 +63,12 @@ class NullCaptureSink:
 
 
 class RecordingDriverConsumer(CaptureConsumer):
-    """Driver consumer that records captured tensors for validation.
+    """Driver consumer that counts captures for benchmark validation.
 
-    Used by bench_capture_e2e.py as a lightweight driver-side consumer
-    that confirms the capture pipeline is live while measuring
-    end-to-end throughput overhead.
+    Used by bench_capture_e2e.py as a minimal driver-side consumer that
+    confirms the capture pipeline is live while measuring end-to-end
+    throughput overhead. Intentionally stores no tensor data to avoid
+    clone/allocation overhead inflating measurements.
     """
 
     location: ClassVar[Literal["worker", "driver"]] = "driver"
@@ -80,7 +79,7 @@ class RecordingDriverConsumer(CaptureConsumer):
         positions: str = "last_prompt",
     ) -> None:
         self._spec = CaptureSpec(hooks=hooks, positions=positions)
-        self.captures: list[tuple[CaptureKey, torch.Tensor]] = []
+        self._count: int = 0
         self._lock = threading.Lock()
 
     def global_capture_spec(self) -> CaptureSpec:
@@ -89,16 +88,16 @@ class RecordingDriverConsumer(CaptureConsumer):
     def on_capture(
         self,
         key: CaptureKey,
-        tensor: torch.Tensor,
+        tensor: Any,
         sidecar: dict[str, Any],
     ) -> None:
         with self._lock:
-            self.captures.append((key, tensor.clone()))
+            self._count += 1
 
     def clear(self) -> None:
         with self._lock:
-            self.captures.clear()
+            self._count = 0
 
     def count(self) -> int:
         with self._lock:
-            return len(self.captures)
+            return self._count
