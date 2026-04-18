@@ -65,3 +65,9 @@ All results share a common JSON schema with environment metadata, parameters, an
 - entry_points: [scripts/analyze.py]
 - depends_on: [core]
 - doc: docs/features/analysis.md
+
+### capture_consumers
+- description: Benchmarks for vLLM's activation capture pipeline — manager overhead (plan build, GPU gather, dispatch) and filesystem writer throughput
+- entry_points: [scripts/bench_capture_e2e.py, scripts/bench_capture_manager.py, scripts/bench_capture_filesystem.py]
+- depends_on: [core]
+- doc: docs/features/capture_consumers.md

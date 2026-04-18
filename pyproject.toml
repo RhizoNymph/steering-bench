@@ -34,7 +34,9 @@ all = ["steering-bench[vllm,all-external]"]
 dev = ["pytest>=8.0", "ruff>=0.3", "mypy>=1.8"]
 
 [tool.uv.sources]
-vllm = { path = "/home/nymph/Code/vllm", editable = true }
+# Points to the capture-consumers vLLM fork (feat/capture-consumers branch).
+# Steering benchmarks continue to work — the fork includes all upstream changes.
+vllm = { path = "/home/nymph/Code/vllm/capture-consumers", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]
