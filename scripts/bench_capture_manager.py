@@ -67,16 +67,21 @@ def _make_manager(
     num_hidden_layers: int,
     hidden_size: int,
     layers_to_capture: list[int],
-    hook_name: str,
+    hook_names: list[str],
     position_type: str,
     device: torch.device,
 ):
-    """Build a CaptureManager with NullCaptureSinks on CUDA."""
+    """Build a CaptureManager with NullCaptureSinks on CUDA.
+
+    ``hook_names`` is a list — each entry becomes a key in the
+    ``CaptureSpec.hooks`` dict, mapped to the same ``layers_to_capture``.
+    Use a single-element list for a single-hook benchmark.
+    """
     from vllm.v1.capture.manager import CaptureManager
     from vllm.v1.capture.types import CaptureSpec
 
     spec = CaptureSpec(
-        hooks={hook_name: layers_to_capture},
+        hooks={name: layers_to_capture for name in hook_names},
         positions=position_type,
     )
 
@@ -98,12 +103,17 @@ def _run_one(
     batch_view,
     req_ids: list[str],
     hidden: torch.Tensor,
-    hook_name: str,
+    hook_names: list[str],
     layers_to_capture: list[int],
     warmup: int,
     iters: int,
 ) -> dict[str, list[float]]:
-    """Run warmup + measurement and return per-phase sample lists."""
+    """Run warmup + measurement and return per-phase sample lists.
+
+    ``hook_names`` drives the on_hook inner loop — for each (layer, hook)
+    pair in the product, on_hook fires once per iteration.  The hook
+    phase timing covers the entire sequence of kernels.
+    """
     build_samples: list[float] = []
     hook_samples: list[float] = []
     dispatch_samples: list[float] = []
@@ -135,7 +145,8 @@ def _run_one(
             end_ev = torch.cuda.Event(enable_timing=True)
             start_ev.record()
             for layer_idx in layers_to_capture:
-                manager.on_hook(layer_idx, hook_name, hidden)
+                for hook_name in hook_names:
+                    manager.on_hook(layer_idx, hook_name, hidden)
             end_ev.record()
             torch.cuda.synchronize()
 
@@ -188,7 +199,22 @@ def main():
         help="Comma-separated list of layer counts to capture"
     )
     parser.add_argument("--prompt-len", type=int, default=64)
-    parser.add_argument("--hook-name", default="post_mlp")
+    parser.add_argument(
+        "--hook-name",
+        default="post_mlp",
+        help="(legacy) Single hook name. Ignored if --hook-sets is set.",
+    )
+    parser.add_argument(
+        "--hook-sets",
+        default=None,
+        help=(
+            "Semicolon-separated list of comma-separated hook-name sets. "
+            "Each set becomes one sweep run, so "
+            "'post_mlp;post_mlp,post_attn;post_mlp,post_attn,pre_mlp,pre_attn' "
+            "runs three passes with 1, 2, and 4 hooks respectively. "
+            "Default behavior (unset) uses --hook-name as a single-hook set."
+        ),
+    )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--output-dir", default="results/capture/")
@@ -212,21 +238,38 @@ def main():
     position_types = args.position_types.split(",")
     layer_counts = [int(x) for x in args.layer_counts.split(",")]
 
+    # Parse hook sets.  ``--hook-sets a,b;c,d`` → [["a","b"], ["c","d"]].
+    # Without it, fall back to a single-hook set from ``--hook-name``.
+    if args.hook_sets:
+        hook_sets = [
+            [name.strip() for name in s.split(",") if name.strip()]
+            for s in args.hook_sets.split(";")
+            if s.strip()
+        ]
+    else:
+        hook_sets = [[args.hook_name]]
+
     # Clamp layer counts to model's actual depth.
     layer_counts = [min(lc, num_hidden_layers) for lc in layer_counts]
     layer_counts = sorted(set(layer_counts))
 
-    total = len(batch_sizes) * len(consumer_counts) * len(position_types) * len(layer_counts)
+    total = (
+        len(batch_sizes) * len(consumer_counts) * len(position_types)
+        * len(layer_counts) * len(hook_sets)
+    )
     print(f"Capture manager benchmark: {args.model}")
     print(f"  batch_sizes={batch_sizes}, consumers={consumer_counts}")
     print(f"  position_types={position_types}, layer_counts={layer_counts}")
+    print(f"  hook_sets={hook_sets}")
     print(f"  warmup={args.warmup}, iters={args.iters}, total configs={total}")
     print()
 
     all_results = []
 
-    for batch_size, num_consumers, position_type, num_layers in itertools.product(
-        batch_sizes, consumer_counts, position_types, layer_counts
+    for batch_size, num_consumers, position_type, num_layers, hook_set in (
+        itertools.product(
+            batch_sizes, consumer_counts, position_types, layer_counts, hook_sets,
+        )
     ):
         layers_to_capture = list(range(num_layers))
         req_ids = [f"req_{i:04d}" for i in range(batch_size)]
@@ -244,14 +287,15 @@ def main():
             num_hidden_layers=num_hidden_layers,
             hidden_size=hidden_size,
             layers_to_capture=layers_to_capture,
-            hook_name=args.hook_name,
+            hook_names=hook_set,
             position_type=position_type,
             device=device,
         )
 
         label = (
             f"bs={batch_size} nc={num_consumers} "
-            f"pos={position_type} layers={num_layers}"
+            f"pos={position_type} layers={num_layers} "
+            f"hooks={len(hook_set)}({','.join(hook_set)})"
         )
         print(f"  {label}", flush=True)
 
@@ -261,7 +305,7 @@ def main():
                 batch_view=batch_view,
                 req_ids=req_ids,
                 hidden=hidden,
-                hook_name=args.hook_name,
+                hook_names=hook_set,
                 layers_to_capture=layers_to_capture,
                 warmup=args.warmup,
                 iters=args.iters,
@@ -288,6 +332,8 @@ def main():
             "num_consumers": num_consumers,
             "position_type": position_type,
             "num_layers": num_layers,
+            "num_hooks": len(hook_set),
+            "hook_set": hook_set,
             "build_ms": build.to_dict(),
             "hook_ms": hook.to_dict(),
             "dispatch_ms": dispatch.to_dict(),
@@ -303,7 +349,7 @@ def main():
         "model": args.model,
         "hidden_size": hidden_size,
         "num_hidden_layers": num_hidden_layers,
-        "hook_name": args.hook_name,
+        "hook_sets": hook_sets,
         "prompt_len": args.prompt_len,
         "warmup": args.warmup,
         "iters": args.iters,
@@ -317,23 +363,24 @@ def main():
     )
 
     # Summary table
-    print(f"\n{'=' * 100}")
+    print(f"\n{'=' * 110}")
     print(f"  CaptureManager Benchmark: {args.model}")
-    print(f"{'=' * 100}")
+    print(f"{'=' * 110}")
     print(
-        f"{'batch':>6} {'cons':>5} {'pos':<14} {'layers':>6} "
+        f"{'batch':>6} {'cons':>5} {'pos':<14} {'layers':>6} {'hooks':>5} "
         f"{'build_p50':>10} {'hook_p50':>10} {'disp_p50':>10}"
     )
-    print("-" * 100)
+    print("-" * 110)
     for r in all_results:
         print(
             f"{r['batch_size']:>6} {r['num_consumers']:>5} "
             f"{r['position_type']:<14} {r['num_layers']:>6} "
+            f"{r['num_hooks']:>5} "
             f"{r['build_ms']['p50_ms']:>10.3f} "
             f"{r['hook_ms']['p50_ms']:>10.3f} "
             f"{r['dispatch_ms']['p50_ms']:>10.3f}"
         )
-    print(f"{'=' * 100}")
+    print(f"{'=' * 110}")
     print(f"Results written to {args.output_dir}")
 
 
