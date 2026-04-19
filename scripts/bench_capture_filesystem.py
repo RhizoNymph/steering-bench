@@ -167,8 +167,12 @@ def main():
         help="Comma-separated thread pool sizes"
     )
     parser.add_argument(
-        "--hidden-sizes", default="768,4096,8192",
-        help="Comma-separated hidden sizes (float16 rows)"
+        "--hidden-sizes", default="2560,4096,8192",
+        help=(
+            "Comma-separated hidden sizes (float16 rows). "
+            "Defaults cover gemma-3-4b-it (2560), llama-7B-class (4096), "
+            "llama-70B-class (8192)."
+        ),
     )
     parser.add_argument(
         "--num-requests", default="32,128",

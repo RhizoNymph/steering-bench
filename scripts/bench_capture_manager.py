@@ -170,7 +170,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Benchmark CaptureManager plan building and dispatch"
     )
-    parser.add_argument("--model", default="facebook/opt-125m")
+    parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument(
         "--batch-sizes", default="1,8,32",
         help="Comma-separated list of batch sizes"
