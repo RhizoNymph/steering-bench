@@ -263,6 +263,15 @@ def _main_microbench(args: argparse.Namespace) -> None:
 # ──────────────────────────────────────────────────────────── e2e
 
 
+def _wait_for_count(consumer, expected: int, timeout_s: float = 60.0) -> bool:
+    deadline = time.perf_counter() + timeout_s
+    while consumer.count() < expected:
+        if time.perf_counter() >= deadline:
+            return False
+        time.sleep(0.0005)
+    return True
+
+
 def _run_e2e_one(
     model: str,
     work_us: float,
@@ -282,6 +291,8 @@ def _run_e2e_one(
 
     layers_to_capture = list(range(min(num_layers, model_cfg["num_layers"])))
     capture_consumers: list | None
+    consumer = None
+    expected_per_iter = 0
     if work_us < 0:
         # Sentinel for "baseline, no consumer at all".
         capture_consumers = None
@@ -294,6 +305,7 @@ def _run_e2e_one(
             location=location,  # type: ignore[arg-type]
         )
         capture_consumers = [consumer]
+        expected_per_iter = batch_size * len(layers_to_capture)
 
     prompts = make_prompts(batch_size, prompt_len, model=model)
     sp = SamplingParams(max_tokens=output_len, temperature=0.0)
@@ -309,18 +321,30 @@ def _run_e2e_one(
     )
 
     try:
-        # Warmup.
+        # Warmup — drain before next iteration to avoid bleed-over.
         for _ in range(warmup):
             llm.generate(prompts, sp_list)
+            if consumer is not None:
+                _wait_for_count(consumer, expected_per_iter)
+                consumer.clear()
 
-        # Measure.
+        # Measure.  Wall clock includes drain wait so any plugin work that
+        # spills past forward-pass time becomes visible as extra ms.  If
+        # the plugin is fast enough to fully overlap with forward work,
+        # the wait is near-zero and overhead ≈ 0.
         samples_ms: list[float] = []
+        drain_timeouts = 0
         for _ in range(iters):
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             llm.generate(prompts, sp_list)
+            if consumer is not None:
+                if not _wait_for_count(consumer, expected_per_iter):
+                    drain_timeouts += 1
             torch.cuda.synchronize()
             samples_ms.append((time.perf_counter() - t0) * 1000.0)
+            if consumer is not None:
+                consumer.clear()
     finally:
         del llm
         gc.collect()
@@ -334,6 +358,8 @@ def _run_e2e_one(
         "p50_ms": stats.p50_ms,
         "p99_ms": stats.p99_ms,
         "tokens_per_sec": tokens_per_sec,
+        "expected_per_iter": expected_per_iter,
+        "drain_timeouts": drain_timeouts,
     }
 
 
@@ -521,9 +547,13 @@ def main():
     parser.add_argument("--output-dir", default="results/capture/")
     parser.add_argument("--tag", default="")
 
-    # Work-sweep common.
-    parser.add_argument("--work-us", default="0,10,100,500,1000,2500,5000",
-                        help="Comma-separated work_us points to sweep")
+    # Work-sweep common.  E2E mode needs higher values because plugin work
+    # overlaps with forward-pass time — saturation on gemma-3-4b requires
+    # tens of milliseconds per on_capture call at batch=8.
+    parser.add_argument(
+        "--work-us", default="0,100,1000,10000,50000,200000",
+        help="Comma-separated work_us points to sweep",
+    )
     parser.add_argument("--work-modes", default="busy,sleep,queue",
                         help="Work modes to sweep (busy/sleep/queue)")
 

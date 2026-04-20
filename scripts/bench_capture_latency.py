@@ -294,6 +294,22 @@ def _main_microbench(args: argparse.Namespace) -> None:
 # ──────────────────────────────────────────────────────────── e2e
 
 
+def _wait_for_count(consumer, expected: int, timeout_s: float = 30.0) -> bool:
+    """Block until ``consumer.count() >= expected`` or timeout.
+
+    Driver-side consumers receive chunks via IPC, so on_capture may fire
+    *after* ``llm.generate()`` returns.  Any latency number drained before
+    this catches up is measuring "zero chunks" rather than the real
+    pipeline delay.  Returns True on success, False on timeout.
+    """
+    deadline = time.perf_counter() + timeout_s
+    while consumer.count() < expected:
+        if time.perf_counter() >= deadline:
+            return False
+        time.sleep(0.0005)
+    return True
+
+
 def _run_e2e_one(
     model: str,
     location: str,
@@ -315,6 +331,8 @@ def _run_e2e_one(
         positions=position_type,
         location=location,  # type: ignore[arg-type]
     )
+    # One finalize → one on_capture call per (request, layer, hook) key.
+    expected_per_iter = batch_size * len(layers_to_capture)
 
     prompts = make_prompts(batch_size, prompt_len, model=model)
     sp = SamplingParams(max_tokens=output_len, temperature=0.0)
@@ -329,18 +347,23 @@ def _run_e2e_one(
         max_model_len=512,
     )
 
-    # Warmup.
+    # Warmup — drain fully so state doesn't leak into measured iters.
     for _ in range(warmup):
         consumer.clear()
         llm.generate(prompts, sp_list)
+        _wait_for_count(consumer, expected_per_iter)
+        consumer.clear()
 
     # Measure.
     per_iter_samples_ms: list[float] = []
     per_iter_chunk_counts: list[int] = []
+    drain_timeouts = 0
     for _ in range(iters):
         consumer.clear()
         t_start = time.perf_counter_ns()
         llm.generate(prompts, sp_list)
+        if not _wait_for_count(consumer, expected_per_iter):
+            drain_timeouts += 1
         stamps = consumer.drain_timestamps()
         per_iter_chunk_counts.append(len(stamps))
         for _key, ts_ns in stamps:
@@ -351,11 +374,16 @@ def _run_e2e_one(
     torch.cuda.empty_cache()
 
     if not per_iter_samples_ms:
-        return {"error": "no chunks delivered"}
+        return {
+            "error": "no chunks delivered",
+            "drain_timeouts": drain_timeouts,
+        }
 
     stats = compute_stats(per_iter_samples_ms)
     return {
         "chunks_per_iter_mean": sum(per_iter_chunk_counts) / len(per_iter_chunk_counts),
+        "expected_per_iter": expected_per_iter,
+        "drain_timeouts": drain_timeouts,
         "n_samples": stats.n,
         "mean_ms": stats.mean_ms,
         "p50_ms": stats.p50_ms,
@@ -490,8 +518,17 @@ def main():
     parser.add_argument("--iters", type=int, default=50)
 
     # E2E-specific.
-    parser.add_argument("--locations", default="worker,driver",
-                        help="(e2e only) consumer locations to sweep")
+    parser.add_argument(
+        "--locations",
+        default="driver",
+        help=(
+            "(e2e only) consumer locations to sweep. vLLM rejects "
+            "pre-constructed CaptureConsumer instances with location='worker' "
+            "(worker-side consumers must be registered as plugin dicts), so "
+            "the E2E benchmark runs driver-only. For worker-side latency, "
+            "see --mode microbench."
+        ),
+    )
     parser.add_argument("--output-len", type=int, default=32,
                         help="(e2e only) tokens to generate per request")
 

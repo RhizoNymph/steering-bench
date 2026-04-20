@@ -216,6 +216,10 @@ class TimestampingConsumer(CaptureConsumer):
             self._timestamps.clear()
             return out
 
+    def count(self) -> int:
+        with self._lock:
+            return len(self._timestamps)
+
     def clear(self) -> None:
         with self._lock:
             self._timestamps.clear()
