@@ -76,6 +76,9 @@ def _make_manager(
     ``hook_names`` is a list — each entry becomes a key in the
     ``CaptureSpec.hooks`` dict, mapped to the same ``layers_to_capture``.
     Use a single-element list for a single-hook benchmark.
+
+    Returns ``(manager, sinks)`` so callers can clear per-sink state
+    without reaching into ``manager._consumers``.
     """
     from vllm.v1.capture.manager import CaptureManager
     from vllm.v1.capture.types import CaptureSpec
@@ -88,7 +91,7 @@ def _make_manager(
     sinks = tuple(NullCaptureSink() for _ in range(num_consumers))
     specs = tuple(spec for _ in range(num_consumers))
 
-    return CaptureManager(
+    manager = CaptureManager(
         consumers=sinks,
         consumer_specs=specs,
         num_hidden_layers=num_hidden_layers,
@@ -96,10 +99,12 @@ def _make_manager(
         model_dtype=torch.float16,
         device=device,
     )
+    return manager, sinks
 
 
 def _run_one(
     manager,
+    sinks,
     batch_view,
     req_ids: list[str],
     hidden: torch.Tensor,
@@ -160,7 +165,7 @@ def _run_one(
             for rid in req_ids:
                 manager.finalize_request(rid)
             # Clear sink result tables.
-            for sink in manager._consumers:
+            for sink in sinks:
                 sink.clear()
 
             if phase == "measure":
@@ -282,7 +287,7 @@ def main():
 
         batch_view = _make_batch_view(batch_size, args.prompt_len, req_ids)
 
-        manager = _make_manager(
+        manager, sinks = _make_manager(
             num_consumers=num_consumers,
             num_hidden_layers=num_hidden_layers,
             hidden_size=hidden_size,
@@ -302,6 +307,7 @@ def main():
         try:
             samples = _run_one(
                 manager=manager,
+                sinks=sinks,
                 batch_view=batch_view,
                 req_ids=req_ids,
                 hidden=hidden,

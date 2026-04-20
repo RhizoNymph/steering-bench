@@ -100,7 +100,13 @@ def _run_microbench_one(
         device=device,
     )
 
-    dispatch_samples_ms: list[float] = []
+    # "Pipeline" here = dispatch_step_captures + finalize_request for all
+    # requests + cuda sync.  The finalize step is included because queue
+    # mode drains the worker-thread backlog on submit_finalize, so leaving
+    # it out would hide the full cost of queue-mode plugin work.  Busy
+    # and sleep modes do their work synchronously in submit_chunk, so the
+    # numbers are directly comparable across modes.
+    pipeline_samples_ms: list[float] = []
 
     try:
         for phase in ("warmup", "measure"):
@@ -119,17 +125,15 @@ def _run_microbench_one(
 
                 t0 = time.perf_counter()
                 manager.dispatch_step_captures(plan)
-                # Ensure queued work is drained on submit_finalize, so
-                # dispatch_ms reflects the full deliver+process cost.
                 for rid in req_ids:
                     manager.finalize_request(rid)
                 torch.cuda.synchronize()
                 t1 = time.perf_counter()
 
                 if phase == "measure":
-                    dispatch_samples_ms.append((t1 - t0) * 1000.0)
+                    pipeline_samples_ms.append((t1 - t0) * 1000.0)
 
-                for sink in manager._consumers:
+                for sink in sinks:
                     sink.clear()
     finally:
         for sink in sinks:
@@ -141,12 +145,12 @@ def _run_microbench_one(
         gc.collect()
         torch.cuda.empty_cache()
 
-    stats = compute_stats(dispatch_samples_ms)
+    stats = compute_stats(pipeline_samples_ms)
     return {
         "n": stats.n,
-        "dispatch_p50_ms": stats.p50_ms,
-        "dispatch_p99_ms": stats.p99_ms,
-        "dispatch_mean_ms": stats.mean_ms,
+        "pipeline_p50_ms": stats.p50_ms,
+        "pipeline_p99_ms": stats.p99_ms,
+        "pipeline_mean_ms": stats.mean_ms,
     }
 
 
@@ -210,8 +214,8 @@ def _main_microbench(args: argparse.Namespace) -> None:
             continue
 
         print(
-            f"    dispatch_p50={result['dispatch_p50_ms']:.3f}ms  "
-            f"p99={result['dispatch_p99_ms']:.3f}ms"
+            f"    pipeline_p50={result['pipeline_p50_ms']:.3f}ms  "
+            f"p99={result['pipeline_p99_ms']:.3f}ms"
         )
         all_results.append({
             "work_us": work_us,
@@ -244,17 +248,17 @@ def _main_microbench(args: argparse.Namespace) -> None:
     print(f"  Plugin-Work Microbench: {args.model}")
     print(f"{'=' * 80}")
     print(f"{'mode':<8} {'work_us':>8} {'cons':>5} "
-          f"{'p50_ms':>10} {'p99_ms':>10} {'mean_ms':>10}")
+          f"{'pipe_p50':>10} {'pipe_p99':>10} {'pipe_mean':>10}")
     print("-" * 80)
     for r in all_results:
         if "error" in r:
             print(f"{r['mode']:<8} {r['work_us']:>8.0f} "
-                  f"{r['num_consumers']:>5} ERROR")
+                  f"{r['num_consumers']:>5}  ERROR: {r['error']}")
             continue
         print(
             f"{r['mode']:<8} {r['work_us']:>8.0f} {r['num_consumers']:>5} "
-            f"{r['dispatch_p50_ms']:>10.3f} {r['dispatch_p99_ms']:>10.3f} "
-            f"{r['dispatch_mean_ms']:>10.3f}"
+            f"{r['pipeline_p50_ms']:>10.3f} {r['pipeline_p99_ms']:>10.3f} "
+            f"{r['pipeline_mean_ms']:>10.3f}"
         )
     print(f"{'=' * 80}")
     print(f"Results written to {args.output_dir}")
@@ -297,15 +301,17 @@ def _run_e2e_one(
         # Sentinel for "baseline, no consumer at all".
         capture_consumers = None
     else:
+        hooks_dict = {hook_name: layers_to_capture}
         consumer = SimulatedWorkConsumer(
-            hooks={hook_name: layers_to_capture},
+            hooks=hooks_dict,
             positions=position_type,
             work_us=work_us,
             mode=mode,  # type: ignore[arg-type]
             location=location,  # type: ignore[arg-type]
         )
         capture_consumers = [consumer]
-        expected_per_iter = batch_size * len(layers_to_capture)
+        # One on_capture call per (request, layer, hook) key.
+        expected_per_iter = batch_size * sum(len(v) for v in hooks_dict.values())
 
     prompts = make_prompts(batch_size, prompt_len, model=model)
     sp = SamplingParams(max_tokens=output_len, temperature=0.0)
@@ -322,10 +328,12 @@ def _run_e2e_one(
 
     try:
         # Warmup — drain before next iteration to avoid bleed-over.
-        for _ in range(warmup):
+        for wi in range(warmup):
             llm.generate(prompts, sp_list)
             if consumer is not None:
-                _wait_for_count(consumer, expected_per_iter)
+                drained = _wait_for_count(consumer, expected_per_iter)
+                if not drained and wi == 0 and consumer.count() == 0:
+                    return {"error": "warmup #0 delivered 0 chunks (consumer not firing)"}
                 consumer.clear()
 
         # Measure.  Wall clock includes drain wait so any plugin work that
@@ -334,13 +342,17 @@ def _run_e2e_one(
         # the wait is near-zero and overhead ≈ 0.
         samples_ms: list[float] = []
         drain_timeouts = 0
-        for _ in range(iters):
+        for i in range(iters):
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             llm.generate(prompts, sp_list)
             if consumer is not None:
                 if not _wait_for_count(consumer, expected_per_iter):
                     drain_timeouts += 1
+                    # Bail after 2 consecutive timeouts — subsequent iters
+                    # will just burn the timeout budget again.
+                    if drain_timeouts >= 2 and i <= drain_timeouts:
+                        return {"error": f"drain timeout on {drain_timeouts} iters"}
             torch.cuda.synchronize()
             samples_ms.append((time.perf_counter() - t0) * 1000.0)
             if consumer is not None:
@@ -350,6 +362,8 @@ def _run_e2e_one(
         gc.collect()
         torch.cuda.empty_cache()
 
+    if not samples_ms:
+        return {"error": "no samples collected"}
     stats = compute_stats(samples_ms)
     tokens_per_sec = (batch_size * output_len) / (stats.mean_ms / 1000.0)
     return {
@@ -515,6 +529,12 @@ def _main_e2e(args: argparse.Namespace) -> None:
     print("-" * 90)
     for r in all_results:
         if "error" in r:
+            print(
+                f"{r.get('mode', '?'):<10} "
+                f"{r.get('batch_size', 0):>5} "
+                f"{r.get('work_us', 0):>8.0f}  "
+                f"ERROR: {r['error']}"
+            )
             continue
         ov = r.get("overhead_pct")
         ov_str = f"{ov:+.1f}%" if ov is not None else "baseline"
@@ -560,8 +580,14 @@ def main():
     # Microbench-specific.
     parser.add_argument("--num-consumers", default="1,2,4")
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--iters", type=int, default=50)
+    parser.add_argument(
+        "--warmup", type=int, default=None,
+        help="Warmup iterations (default: 10 for microbench, 2 for e2e)",
+    )
+    parser.add_argument(
+        "--iters", type=int, default=None,
+        help="Measured iterations (default: 50 for microbench, 5 for e2e)",
+    )
 
     # E2E-specific.
     parser.add_argument("--batch-sizes", default="8",
@@ -575,6 +601,14 @@ def main():
                               "compute the plugin work budget"))
 
     args = parser.parse_args()
+
+    # Mode-appropriate iter defaults.  E2E runs a full model forward
+    # pass per iter plus drain-wait (up to ~30s at work_us=200ms), so
+    # iters=5 is already 5-20 minutes per config point.
+    if args.warmup is None:
+        args.warmup = 10 if args.mode == "microbench" else 2
+    if args.iters is None:
+        args.iters = 50 if args.mode == "microbench" else 5
 
     if args.mode == "microbench":
         _main_microbench(args)

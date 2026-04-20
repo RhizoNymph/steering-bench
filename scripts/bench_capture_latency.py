@@ -141,7 +141,9 @@ def _run_microbench_one(
                     manager.on_hook(layer_idx, hook_name, hidden)
                 torch.cuda.synchronize()
 
-                # Drain any stale stamps from warmup spillover.
+                # Drain defensively — no-op in the steady state, but
+                # guards against any stamps left behind by error paths
+                # or future refactors.
                 for sink in sinks:
                     sink.drain_timestamps()
 
@@ -157,13 +159,12 @@ def _run_microbench_one(
                         for _key, _step, ts_ns in stamps:
                             per_consumer_us[idx].append((ts_ns - t_dispatch_start) / 1000.0)
                 else:
-                    # Discard warmup stamps.
                     for sink in sinks:
                         sink.drain_timestamps()
 
                 for rid in req_ids:
                     manager.finalize_request(rid)
-                for sink in manager._consumers:
+                for sink in sinks:
                     sink.clear()
     finally:
         del manager
@@ -278,7 +279,8 @@ def _main_microbench(args: argparse.Namespace) -> None:
     for r in all_results:
         if "error" in r:
             print(f"{r['batch_size']:>5} {r['num_consumers']:>4} "
-                  f"{r['num_layers']:>6} {r['position_type']:<14} ERROR")
+                  f"{r['num_layers']:>6} {r['position_type']:<14}  "
+                  f"ERROR: {r['error']}")
             continue
         a = r["all"]
         print(
@@ -326,13 +328,16 @@ def _run_e2e_one(
     from vllm import LLM, SamplingParams
 
     layers_to_capture = list(range(min(num_layers, model_cfg["num_layers"])))
+    hooks_dict = {hook_name: layers_to_capture}
     consumer = TimestampingConsumer(
-        hooks={hook_name: layers_to_capture},
+        hooks=hooks_dict,
         positions=position_type,
         location=location,  # type: ignore[arg-type]
     )
     # One finalize → one on_capture call per (request, layer, hook) key.
-    expected_per_iter = batch_size * len(layers_to_capture)
+    # Count from the hooks dict so this remains correct if the caller
+    # ever passes multiple hook types.
+    expected_per_iter = batch_size * sum(len(v) for v in hooks_dict.values())
 
     prompts = make_prompts(batch_size, prompt_len, model=model)
     sp = SamplingParams(max_tokens=output_len, temperature=0.0)
@@ -348,22 +353,40 @@ def _run_e2e_one(
     )
 
     # Warmup — drain fully so state doesn't leak into measured iters.
-    for _ in range(warmup):
+    # If the first warmup iter fails to deliver any chunks, give up
+    # immediately — the consumer is misconfigured or the driver bridge
+    # isn't firing, and running 10 more warmup iters won't help.
+    for wi in range(warmup):
         consumer.clear()
         llm.generate(prompts, sp_list)
-        _wait_for_count(consumer, expected_per_iter)
+        if not _wait_for_count(consumer, expected_per_iter):
+            if wi == 0 and consumer.count() == 0:
+                del llm
+                gc.collect()
+                torch.cuda.empty_cache()
+                return {"error": (
+                    "warmup #0 delivered 0 chunks after 30s wait — "
+                    "consumer likely not firing (check location / hooks / positions)"
+                )}
         consumer.clear()
 
     # Measure.
     per_iter_samples_ms: list[float] = []
     per_iter_chunk_counts: list[int] = []
     drain_timeouts = 0
-    for _ in range(iters):
+    for i in range(iters):
         consumer.clear()
         t_start = time.perf_counter_ns()
         llm.generate(prompts, sp_list)
         if not _wait_for_count(consumer, expected_per_iter):
             drain_timeouts += 1
+            # Two consecutive timeouts → bail; fixture is broken and
+            # further iterations will just waste minutes apiece.
+            if drain_timeouts >= 2 and i <= drain_timeouts:
+                del llm
+                gc.collect()
+                torch.cuda.empty_cache()
+                return {"error": f"drain timeout on {drain_timeouts} consecutive iters"}
         stamps = consumer.drain_timestamps()
         per_iter_chunk_counts.append(len(stamps))
         for _key, ts_ns in stamps:
@@ -400,6 +423,15 @@ def _main_e2e(args: argparse.Namespace) -> None:
 
     model_cfg = get_model_config(args.model)
     locations = args.locations.split(",")
+    if "worker" in locations:
+        print(
+            "ERROR: location='worker' is not supported in E2E mode — vLLM "
+            "rejects pre-constructed CaptureConsumer instances with "
+            "location='worker'. Use --mode microbench for worker-side "
+            "latency measurements.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
     layer_counts = [int(x) for x in args.layer_counts.split(",")]
     position_types = args.position_types.split(",")
@@ -482,7 +514,8 @@ def _main_e2e(args: argparse.Namespace) -> None:
     for r in all_results:
         if "error" in r:
             print(f"{r['location']:<8} {r['batch_size']:>5} "
-                  f"{r['num_layers']:>6} {r['position_type']:<14} ERROR")
+                  f"{r['num_layers']:>6} {r['position_type']:<14}  "
+                  f"ERROR: {r['error']}")
             continue
         print(
             f"{r['location']:<8} {r['batch_size']:>5} "
@@ -514,8 +547,14 @@ def main():
                         help="(microbench only) consumer counts")
     parser.add_argument("--layer-counts", default="1,17,34")
     parser.add_argument("--position-types", default="last_prompt,all_prompt")
-    parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--iters", type=int, default=50)
+    parser.add_argument(
+        "--warmup", type=int, default=None,
+        help="Warmup iterations (default: 10 for microbench, 2 for e2e)",
+    )
+    parser.add_argument(
+        "--iters", type=int, default=None,
+        help="Measured iterations (default: 50 for microbench, 10 for e2e)",
+    )
 
     # E2E-specific.
     parser.add_argument(
@@ -533,6 +572,13 @@ def main():
                         help="(e2e only) tokens to generate per request")
 
     args = parser.parse_args()
+
+    # Fill in mode-appropriate defaults.  E2E is much slower per iter
+    # (full model forward pass) so fewer iters go further.
+    if args.warmup is None:
+        args.warmup = 10 if args.mode == "microbench" else 2
+    if args.iters is None:
+        args.iters = 50 if args.mode == "microbench" else 10
 
     if args.mode == "microbench":
         _main_microbench(args)
