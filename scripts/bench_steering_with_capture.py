@@ -107,9 +107,56 @@ def _build_capture_consumers(
     ]
 
 
+CAPTURE_SPEC_PRESETS = ("minimal", "medium", "heavy")
+
+
+def _build_capture_field(
+    capture_spec: str,
+    capture_layer: int,
+    num_layers: int,
+) -> dict:
+    """Build the per-request ``capture`` field for the filesystem consumer.
+
+    Three presets that scale the per-step gather/dispatch work:
+
+    - ``minimal``: 1 hook × 1 layer × ``last_prompt`` — 1 row per request.
+      Floor case for "active capture overhead".
+    - ``medium``: 1 hook × every 4th layer × ``all_generated`` —
+      ``ceil(num_layers/4) * output_len`` rows per request. Stresses the
+      manager's per-step gather + sink dispatch without saturating bandwidth.
+    - ``heavy``: 2 hooks × all layers × ``all`` — ``2 * num_layers * (prompt_len + output_len)``
+      rows per request. Stresses the gather kernel and the writer thread.
+    """
+    if capture_spec == "minimal":
+        hooks = {"post_mlp": [capture_layer]}
+        positions: str = "last_prompt"
+    elif capture_spec == "medium":
+        every_fourth = list(range(0, num_layers, 4))
+        hooks = {"post_mlp": every_fourth}
+        positions = "all_generated"
+    elif capture_spec == "heavy":
+        all_layers = list(range(num_layers))
+        hooks = {"post_mlp": all_layers, "post_attn": all_layers}
+        positions = "all"
+    else:
+        raise ValueError(
+            f"unknown capture_spec preset {capture_spec!r}; "
+            f"expected one of {CAPTURE_SPEC_PRESETS}"
+        )
+    return {
+        "filesystem": {
+            "request_id": "bench",
+            "tag": "bench",
+            "hooks": hooks,
+            "positions": positions,
+        }
+    }
+
+
 def _build_sampling_params(
     steering_mode: str,
     capture_mode: str,
+    capture_spec: str,
     batch_size: int,
     max_tokens: int,
     hidden_size: int,
@@ -121,14 +168,11 @@ def _build_sampling_params(
 
     capture_field = None
     if capture_mode == "cap_on_active":
-        capture_field = {
-            "filesystem": {
-                "request_id": "bench",
-                "tag": "bench",
-                "hooks": {"post_mlp": [capture_layer]},
-                "positions": "last_prompt",
-            }
-        }
+        capture_field = _build_capture_field(
+            capture_spec=capture_spec,
+            capture_layer=capture_layer,
+            num_layers=num_layers,
+        )
 
     def _sp(steering_kwargs: dict | None = None):
         kw = dict(max_tokens=max_tokens, temperature=0.0)
@@ -173,6 +217,7 @@ def _run_cell(
     model: str,
     steering_mode: str,
     capture_mode: str,
+    capture_spec: str,
     batch_size: int,
     prompt_len: int,
     max_tokens: int,
@@ -220,6 +265,7 @@ def _run_cell(
     sp_list = _build_sampling_params(
         steering_mode=steering_mode,
         capture_mode=capture_mode,
+        capture_spec=capture_spec,
         batch_size=batch_size,
         max_tokens=max_tokens,
         hidden_size=hidden_size,
@@ -279,7 +325,18 @@ def main():
         "--capture-layer",
         type=int,
         default=15,
-        help="Layer index used by the capture consumer (clamped to num_layers-1).",
+        help="Layer index used by the minimal capture spec (clamped to num_layers-1).",
+    )
+    parser.add_argument(
+        "--capture-spec",
+        choices=CAPTURE_SPEC_PRESETS,
+        default="minimal",
+        help=(
+            "Per-request capture spec preset for cap_on_active. "
+            "minimal=1 hook×1 layer×last_prompt (default, ~1 row/req); "
+            "medium=1 hook×every-4th-layer×all_generated; "
+            "heavy=2 hooks×all layers×all positions."
+        ),
     )
     parser.add_argument(
         "--disable-prefix-cache",
@@ -358,6 +415,7 @@ def main():
                     model=args.model,
                     steering_mode=steering_mode,
                     capture_mode=capture_mode,
+                    capture_spec=args.capture_spec,
                     batch_size=batch_size,
                     prompt_len=args.prompt_len,
                     max_tokens=args.max_tokens,
@@ -407,6 +465,7 @@ def main():
                     "model": args.model,
                     "steering_mode": steering_mode,
                     "capture_mode": capture_mode,
+                    "capture_spec": args.capture_spec,
                     "batch_size": batch_size,
                     "prompt_len": args.prompt_len,
                     "max_tokens": args.max_tokens,
