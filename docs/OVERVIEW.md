@@ -44,7 +44,7 @@ All results share a common JSON schema with environment metadata, parameters, an
 
 ### vllm_benchmarks
 - description: End-to-end vLLM system benchmarks (latency, throughput, memory)
-- entry_points: [scripts/bench_latency.py, scripts/bench_throughput.py, scripts/bench_memory.py]
+- entry_points: [scripts/bench_latency.py, scripts/bench_throughput.py, scripts/bench_memory.py, scripts/bench_steering_with_capture.py]
 - depends_on: [core]
 - doc: docs/features/vllm_benchmarks.md
 

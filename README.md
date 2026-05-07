@@ -80,6 +80,7 @@ End-to-end `LLM.generate()` timings.
 | `bench_memory.py` | GPU memory cost of steering buffers. | `--configs-sweep 0,4,8,16,32`, `--num-gpu-blocks 64`, `--gpu-memory-utilization 0.6` |
 | `bench_max_tokens.py` | Per-step overhead convergence across generation length. | `--max-tokens-list 64,128,256,512,1024,2048`, `--num-active-list 0,1,8,16`, `--max-steering-configs 32`, `--distinct-vectors` |
 | `bench_mixed_batch.py` | Do non-steered requests in a mixed batch pay the steering cost? | `--distinct-vectors`, `--max-steering-configs`, `--num-active-only`, `--max-num-seqs` (needed for batch > 256) |
+| `bench_steering_with_capture.py` | Steering-mode latency with the capture-consumer plugin off / installed-idle / installed-active. Validates the cold-path constant-fold claim. | `--steering-modes`, `--capture-modes cap_off,cap_on_idle,cap_on_active`, `--capture-layer 15`, `--no-subprocess` |
 | `bench_table_sizing.py` | `max_steering_configs` × `batch_size` × `distinct_configs` sweep. | `--max-configs-sweep 4,16`, `--distinct-sweep 1,4,8`, `--batch-sizes 8,16,32`, `--skip-disabled`, `--skip-steering`. Default `--tag table-sizing`. |
 
 ### Ablations (`results/ablation/`)
