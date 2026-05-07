@@ -15,11 +15,18 @@ overhead to the steering hot path. For every steering mode (disabled,
 enabled_idle, per_request_1, per_request_4) it sweeps three capture states:
 
   cap_off       no consumers, capture system inactive (cold path)
-  cap_on_idle   one logging consumer registered globally on a single
-                (post_mlp, layer L) point but no per-request spec — measures
-                the manager-installed-but-mostly-idle worst case
-  cap_on_active same logging consumer + per-request capture asking for
-                last_prompt at (post_mlp, layer L) on every request
+  cap_on_idle   filesystem consumer registered but the request does NOT pass
+                a per-request ``capture`` field — manager installed, plan
+                empty, captures the per-step bookkeeping overhead with no
+                actual gather/dispatch work
+  cap_on_active same filesystem consumer + per-request capture asking for
+                last_prompt at (post_mlp, layer L) — manager builds a plan,
+                gathers rows, dispatches chunks to the writer
+
+The filesystem consumer is used (rather than logging) because it has
+``reads_client_spec=True``, which is necessary for the per-request opt-in path
+to actually accept the spec at admission. Each ``LLM`` is given a fresh
+tempdir so writes don't compound across runs.
 
 Output: same schema as ``bench_latency.py`` but tagged ``vllm.steering_with_capture``
 plus the three new per-config columns. Each (mode, cap, batch_size) cell is
@@ -31,9 +38,18 @@ from __future__ import annotations
 
 import argparse
 import gc
+import os
 import sys
 import time
 from pathlib import Path
+
+# Force vLLM to run the engine core in-process. The default forks a
+# subprocess after the parent has touched CUDA (we call
+# ``torch.cuda.is_available()`` in ``main`` plus ``torch.cuda.synchronize``
+# in the measurement loop), and PyTorch refuses to re-init CUDA in a
+# forked child. Mirrors the convention in nsys_target.py /
+# profile_steering.py / bench_capture_plugin_work.py.
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -67,19 +83,25 @@ def _make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
 def _build_capture_consumers(
     capture_mode: str,
     capture_layer: int,
+    fs_root: str | None,
 ) -> list[dict] | None:
-    """Translate ``capture_mode`` into the LLM(capture_consumers=...) value."""
+    """Translate ``capture_mode`` into the LLM(capture_consumers=...) value.
+
+    Uses the filesystem consumer because it has ``reads_client_spec=True``,
+    so per-request capture admission actually succeeds. The logging consumer
+    is global-only and would silently reject the per-request spec needed by
+    ``cap_on_active``, collapsing it into ``cap_on_idle``.
+    """
     if capture_mode == "cap_off":
         return None
-    # Both cap_on_idle and cap_on_active register the same logging consumer.
-    # The active variant simply adds a per-request capture spec on top.
+    if fs_root is None:
+        raise ValueError("filesystem root required for cap_on_* modes")
     return [
         {
-            "name": "logging",
+            "name": "filesystem",
             "params": {
-                "hooks": {"post_mlp": [capture_layer]},
-                "positions": "last_prompt",
-                "level": "WARNING",
+                "root": fs_root,
+                "writer_threads": 4,
             },
         }
     ]
@@ -100,7 +122,9 @@ def _build_sampling_params(
     capture_field = None
     if capture_mode == "cap_on_active":
         capture_field = {
-            "logging": {
+            "filesystem": {
+                "request_id": "bench",
+                "tag": "bench",
                 "hooks": {"post_mlp": [capture_layer]},
                 "positions": "last_prompt",
             }
@@ -162,12 +186,20 @@ def _run_cell(
     max_model_len: int,
 ) -> dict:
     """Run a single (steering, capture, batch_size) cell. Picklable for spawn."""
+    import tempfile
+
     from vllm import LLM
 
     enable_steering = steering_mode != "disabled"
     max_configs = 8 if steering_mode == "per_request_4" else 4
 
-    capture_consumers = _build_capture_consumers(capture_mode, capture_layer)
+    fs_root: str | None = None
+    fs_tmpdir = None
+    if capture_mode != "cap_off":
+        fs_tmpdir = tempfile.TemporaryDirectory(prefix="bench-capture-")
+        fs_root = fs_tmpdir.name
+
+    capture_consumers = _build_capture_consumers(capture_mode, capture_layer, fs_root)
 
     print(
         f"    [load] steering={enable_steering} max_configs={max_configs} "
@@ -214,6 +246,8 @@ def _run_cell(
         del llm
         gc.collect()
         torch.cuda.empty_cache()
+        if fs_tmpdir is not None:
+            fs_tmpdir.cleanup()
 
 
 def main():
