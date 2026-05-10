@@ -267,6 +267,26 @@ if [[ "$DO_4B" == "1" ]]; then
         --max-num-seqs 128 \
         --gpu-memory-utilization 0.85
 
+    # ─── Steering modes matrix ────────────────────────────────────────
+    # Cross-product bench of the new submission modes (named_shared,
+    # inline_shared, inline_unique, per_request_4) against batch_size,
+    # num_hooks, and prompt_len.  This is the headline data for "auto-
+    # promote (vllm PR #145) closes the inline-vs-named gap": the
+    # inline_shared / named_shared ratio per cell should be ≈1.0.
+    # Also captures hook-count scaling (hooks=1,2,3) and the
+    # research-style "unique spec per request" cost (inline_unique).
+    # Estimated wall: ~2 hr on H100 (was ~2.5 hr on RTX 3090).
+    run_step "4B steering modes matrix" \
+      "$PY" scripts/bench_steering_modes_matrix.py \
+        --model "$MODEL_SMALL" \
+        --modes "disabled,enabled_idle,inline_shared,inline_unique,named_shared,per_request_4" \
+        --batch-sizes "1,4,8,16,32" \
+        --num-hooks-list "1,2,3" \
+        --num-layers-steered-list "all" \
+        --prompt-lens "64,256" \
+        --warmup "$RFC_WARMUP" --iters "$RFC_ITERS" \
+        --output-dir "$OUT/vllm/" --tag "$TAG"
+
     run_step "4B max_tokens sweep" \
       "$PY" scripts/bench_max_tokens.py \
         --model "$MODEL_SMALL" \
@@ -303,6 +323,11 @@ if [[ "$DO_4B" == "1" ]]; then
   if [[ "$DO_4B_SERVING" == "1" ]]; then
     section "Gemma-3-4B online serving"
 
+    # max-steering-configs bumped to 32 (was 16): per_request_n16 mode
+    # cycles 16 distinct vectors and the auto-promote helper (vllm
+    # PR #145) registers a named module per spec on second sight, so
+    # the active table needs to hold 16 inline + 16 named = 32 entries
+    # at peak.  Setting it to 16 would overflow and kill the engine.
     run_step "4B serving (TTFT/TPOT/ITL/E2EL)" \
       "$PY" scripts/bench_serving.py \
         --model "$MODEL_SMALL" \
@@ -311,7 +336,7 @@ if [[ "$DO_4B" == "1" ]]; then
         --num-prompts 128 \
         --concurrency 16 \
         --max-tokens 256 \
-        --max-steering-configs 16 \
+        --max-steering-configs 32 \
         --startup-timeout 600 \
         "${SHARED_SERVING_ARGS[@]}"
   fi
@@ -360,6 +385,9 @@ if [[ "$DO_27B" == "1" ]]; then
   if [[ "$DO_27B_SERVING" == "1" ]]; then
     section "Gemma-3-27B online serving"
 
+    # 27B serving keeps modes=per_request_n16 like 4B, so same logic:
+    # bump max-steering-configs to 32 to fit the 16 inline + 16 named
+    # post-auto-promote.
     run_step "27B serving (TTFT/TPOT/ITL/E2EL)" \
       "$PY" scripts/bench_serving.py \
         --model "$MODEL_LARGE" \
@@ -370,7 +398,7 @@ if [[ "$DO_27B" == "1" ]]; then
         --max-tokens 256 \
         --max-model-len 4096 \
         --gpu-memory-utilization 0.92 \
-        --max-steering-configs 16 \
+        --max-steering-configs 32 \
         --startup-timeout 900 \
         "${SHARED_SERVING_ARGS[@]}"
   fi
