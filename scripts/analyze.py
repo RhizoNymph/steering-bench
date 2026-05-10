@@ -1288,74 +1288,94 @@ def plot_steering_modes_matrix(
     if not needed.issubset(sub.columns):
         return
 
-    panels = (
+    # Sort panels by (prompt_len, num_layers_steered, num_hooks) so the
+    # grid lines up rows by prompt and columns by hooks.
+    panel_sort = (
         sub[["param_num_hooks", "param_num_layers_steered", "param_prompt_len"]]
         .drop_duplicates()
-        .sort_values(by=list(needed - {"param_mode", "param_batch_size"}))
+        .sort_values(
+            by=["param_prompt_len", "param_num_layers_steered", "param_num_hooks"]
+        )
         .values.tolist()
     )
-
-    # 2 metrics × N panels.  Lay out as rows = metric, cols = panel.
-    n_panels = len(panels)
-    if n_panels == 0:
+    if not panel_sort:
         return
-    fig, axes = plt.subplots(
-        2, n_panels,
-        figsize=(max(4 * n_panels, 6), 8),
-        sharex="col",
-        squeeze=False,
-    )
+
+    prompts = sorted({plen for _, _, plen in panel_sort})
+    hooks_axis = sorted({h for h, _, _ in panel_sort})
+    layers_axis = sorted({l for _, l, _ in panel_sort})
+
+    n_rows = len(prompts) * len(layers_axis)
+    n_cols = len(hooks_axis)
 
     modes = _sort_modes(sub["param_mode"].dropna().unique().tolist())
     cmap = plt.get_cmap("tab10")
     color = {m: cmap(i % 10) for i, m in enumerate(modes)}
 
-    for col, (hooks, layers, plen) in enumerate(panels):
-        panel_rows = sub[
-            (sub["param_num_hooks"] == hooks)
-            & (sub["param_num_layers_steered"] == layers)
-            & (sub["param_prompt_len"] == plen)
-        ]
-        for metric_row, (metric, ylabel) in enumerate([
-            ("result_latency_ms_mean_ms", "batch latency (ms)"),
-            ("result_throughput_tokens_per_sec_mean_tps", "throughput (tok/s)"),
-        ]):
-            ax = axes[metric_row][col]
-            for mode in modes:
-                m_rows = panel_rows[panel_rows["param_mode"] == mode]
-                if m_rows.empty or metric not in m_rows.columns:
-                    continue
-                m_rows = m_rows.sort_values("param_batch_size")
-                ax.plot(
-                    m_rows["param_batch_size"],
-                    m_rows[metric],
-                    marker="o", linewidth=1.5,
-                    color=color[mode], label=mode,
-                )
-            ax.set_xscale("log", base=2)
-            ax.grid(True, alpha=0.3)
-            if metric_row == 0:
+    # Two figures: one for batch latency, one for throughput.  Keeps each
+    # readable instead of squashing both metrics into a wider grid.
+    metrics = [
+        ("result_latency_ms_mean_ms", "batch latency (ms)", "latency"),
+        (
+            "result_throughput_tokens_per_sec_mean_tps",
+            "throughput (tok/s)", "throughput",
+        ),
+    ]
+
+    for metric, ylabel, suffix in metrics:
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(max(3.5 * n_cols, 6), max(3 * n_rows, 4)),
+            sharex="col",
+            squeeze=False,
+        )
+
+        for row, (plen, layers) in enumerate(
+            (p, l) for p in prompts for l in layers_axis
+        ):
+            for col, hooks in enumerate(hooks_axis):
+                panel_rows = sub[
+                    (sub["param_num_hooks"] == hooks)
+                    & (sub["param_num_layers_steered"] == layers)
+                    & (sub["param_prompt_len"] == plen)
+                ]
+                ax = axes[row][col]
+                for mode in modes:
+                    m_rows = panel_rows[panel_rows["param_mode"] == mode]
+                    if m_rows.empty or metric not in m_rows.columns:
+                        continue
+                    m_rows = m_rows.sort_values("param_batch_size")
+                    ax.plot(
+                        m_rows["param_batch_size"],
+                        m_rows[metric],
+                        marker="o", linewidth=1.5,
+                        color=color[mode], label=mode,
+                    )
+                ax.set_xscale("log", base=2)
+                ax.grid(True, alpha=0.3)
                 ax.set_title(
-                    f"hooks={int(hooks)}  layers={layers}  prompt={int(plen)}",
-                    fontsize=10,
+                    f"prompt={int(plen)}  layers={layers}  hooks={int(hooks)}",
+                    fontsize=9,
                 )
-            if col == 0:
-                ax.set_ylabel(ylabel)
-            if metric_row == 1:
-                ax.set_xlabel("batch size")
+                if col == 0:
+                    ax.set_ylabel(ylabel, fontsize=9)
+                if row == n_rows - 1:
+                    ax.set_xlabel("batch size", fontsize=9)
 
-    # One legend across the top.
-    handles, labels = axes[0][0].get_legend_handles_labels()
-    if handles:
-        fig.legend(handles, labels, loc="upper center", ncol=min(len(labels), 6),
-                   bbox_to_anchor=(0.5, 1.02))
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        if handles:
+            fig.legend(
+                handles, labels,
+                loc="upper center", ncol=min(len(labels), 6),
+                bbox_to_anchor=(0.5, 1.0),
+            )
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
 
-    _save(
-        fig,
-        output_dir / f"steering_modes_matrix.{fmt}",
-        f"steering_modes_matrix.{fmt}",
-    )
+        _save(
+            fig,
+            output_dir / f"steering_modes_matrix_{suffix}.{fmt}",
+            f"steering_modes_matrix_{suffix}.{fmt}",
+        )
 
 
 def print_steering_modes_matrix_summary(df: pd.DataFrame) -> None:
