@@ -19,7 +19,27 @@ import torch
 
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
-from steering_bench.vectors import random_steering_vectors, random_steering_vectors_diverse
+from steering_bench.vectors import (
+    even_layer_subset,
+    random_steering_vectors,
+    random_steering_vectors_diverse,
+)
+
+NAMED_BENCH_MODULE = "bench_named_shared"
+
+
+def _vectors_to_named_payload(vectors: dict) -> dict:
+    """Convert random_steering_vectors output to register_steering_modules payload."""
+    import numpy as np
+
+    coerced: dict = {}
+    for hook, layer_dict in vectors.items():
+        coerced[hook] = {}
+        for layer_idx, entry in layer_dict.items():
+            if isinstance(entry, np.ndarray):
+                entry = entry.tolist()
+            coerced[hook][layer_idx] = entry
+    return {"vectors": coerced}
 
 MODEL_CONFIGS = {
     "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
@@ -36,30 +56,86 @@ def make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
     return [base] * num_prompts
 
 
+def _legacy_mode_for_distinct(distinct_configs: int) -> str:
+    """Translate a legacy ``--configs-sweep`` integer to a mode name.
+
+    ``0`` → ``disabled`` (steering subsystem off).
+    ``1`` → ``inline_shared`` (single spec across the batch).
+    ``N`` → ``per_request_N`` (cycle ``N`` distinct specs).
+    """
+    if distinct_configs <= 0:
+        return "disabled"
+    if distinct_configs == 1:
+        return "inline_shared"
+    return f"per_request_{distinct_configs}"
+
+
 def run_throughput(
     model: str,
     num_prompts: int,
     prompt_len: int,
     max_tokens: int,
-    distinct_configs: int,
     warmup: int,
     iters: int,
     hidden_size: int,
     num_layers: int,
+    mode: str | None = None,
+    distinct_configs: int | None = None,
     max_steering_configs_override: int | None = None,
     enable_prefix_caching: bool = True,
+    num_hooks: int = 1,
+    num_layers_steered: int | None = None,
 ) -> dict:
-    """Run throughput benchmark for a given config count."""
+    """Run throughput benchmark for a single mode.
+
+    Either *mode* or *distinct_configs* must be set.  If only
+    *distinct_configs* is provided, it is translated to a mode via
+    :func:`_legacy_mode_for_distinct` for backwards compat with the
+    historical CLI.
+
+    Mode catalog matches :func:`bench_latency.run_mode`:
+    ``disabled``, ``enabled_idle``, ``inline_shared``, ``inline_unique``,
+    ``named_shared``, ``per_request_N``.
+    """
     from vllm import LLM, SamplingParams
 
-    enable_steering = distinct_configs > 0
+    if mode is None:
+        if distinct_configs is None:
+            raise ValueError("Either mode or distinct_configs must be set")
+        mode = _legacy_mode_for_distinct(distinct_configs)
+
+    enable_steering = mode != "disabled"
+
     if max_steering_configs_override is not None:
         max_steering = max_steering_configs_override
+    elif mode == "inline_unique":
+        # Each request fresh — the worker table needs ≥ unique-per-iter
+        # plus headroom for warmup vs timed iters.
+        max_steering = max(64, num_prompts * 2)
+    elif mode.startswith("per_request_"):
+        suffix = mode.split("_")[-1]
+        try:
+            n = int(suffix)
+        except ValueError:
+            n = 4
+        max_steering = max(n * 2, 8)
     else:
-        max_steering = max(distinct_configs, 4) if enable_steering else 4
+        max_steering = 4
 
-    print(f"    Loading model (steering={'on' if enable_steering else 'off'}, "
-          f"max_configs={max_steering}, prefix_cache={enable_prefix_caching})...",
+    all_hooks = ["post_mlp", "post_attn", "pre_attn"]
+    if num_hooks < 1 or num_hooks > len(all_hooks):
+        raise ValueError(
+            f"num_hooks must be in [1, {len(all_hooks)}], got {num_hooks}"
+        )
+    active_hooks = all_hooks[:num_hooks]
+    layer_subset = (
+        None if num_layers_steered is None
+        else even_layer_subset(num_layers, num_layers_steered)
+    )
+
+    print(f"    Loading model (mode={mode}, max_configs={max_steering}, "
+          f"prefix_cache={enable_prefix_caching}, hooks={active_hooks}, "
+          f"layers_steered={len(layer_subset) if layer_subset else num_layers})...",
           flush=True)
     llm = LLM(
         model=model,
@@ -72,26 +148,76 @@ def run_throughput(
 
     prompts = make_prompts(num_prompts, prompt_len)
 
-    if distinct_configs == 0:
+    if mode == "disabled" or mode == "enabled_idle":
         sp = SamplingParams(max_tokens=max_tokens, temperature=0.0)
         sp_list = [sp] * num_prompts
-    else:
-        diverse = random_steering_vectors_diverse(
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            num_configs=distinct_configs,
-            hook_points=["post_mlp"],
-            scale=0.1,
-            base_seed=42,
+
+    elif mode == "inline_shared":
+        vectors = random_steering_vectors(
+            hidden_size=hidden_size, num_layers=num_layers,
+            hook_points=active_hooks, scale=0.1, seed=42,
+            layer_subset=layer_subset,
         )
-        sp_list = []
-        for i in range(num_prompts):
-            sp = SamplingParams(
-                max_tokens=max_tokens,
-                temperature=0.0,
-                steering_vectors=diverse[i % distinct_configs],
+        sp = SamplingParams(
+            max_tokens=max_tokens, temperature=0.0,
+            steering_vectors=vectors,
+        )
+        sp_list = [sp] * num_prompts
+
+    elif mode == "inline_unique":
+        diverse = random_steering_vectors_diverse(
+            hidden_size=hidden_size, num_layers=num_layers,
+            num_configs=num_prompts, hook_points=active_hooks, scale=0.1,
+            base_seed=42, layer_subset=layer_subset,
+        )
+        sp_list = [
+            SamplingParams(
+                max_tokens=max_tokens, temperature=0.0,
+                steering_vectors=diverse[i],
             )
-            sp_list.append(sp)
+            for i in range(num_prompts)
+        ]
+
+    elif mode == "named_shared":
+        vectors = random_steering_vectors(
+            hidden_size=hidden_size, num_layers=num_layers,
+            hook_points=active_hooks, scale=0.1, seed=42,
+            layer_subset=layer_subset,
+        )
+        llm.llm_engine.collective_rpc(
+            "register_steering_modules",
+            kwargs={
+                "modules": {NAMED_BENCH_MODULE: _vectors_to_named_payload(vectors)},
+                "replace": True,
+            },
+        )
+        sp = SamplingParams(
+            max_tokens=max_tokens, temperature=0.0,
+            steering_module_ref=(NAMED_BENCH_MODULE, 1.0),
+        )
+        sp_list = [sp] * num_prompts
+
+    elif mode.startswith("per_request_"):
+        suffix = mode.split("_")[-1]
+        try:
+            distinct = int(suffix)
+        except ValueError:
+            raise ValueError(f"Unknown mode: {mode}")
+        diverse = random_steering_vectors_diverse(
+            hidden_size=hidden_size, num_layers=num_layers,
+            num_configs=distinct, hook_points=active_hooks, scale=0.1,
+            base_seed=42, layer_subset=layer_subset,
+        )
+        sp_list = [
+            SamplingParams(
+                max_tokens=max_tokens, temperature=0.0,
+                steering_vectors=diverse[i % distinct],
+            )
+            for i in range(num_prompts)
+        ]
+
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
 
     # Warmup
     print(f"    Warmup ({warmup} iters)...", flush=True)
@@ -156,14 +282,39 @@ def main():
     parser.add_argument("--num-prompts", type=int, default=64)
     parser.add_argument("--prompt-len", type=int, default=64)
     parser.add_argument("--max-tokens", type=int, default=128)
-    parser.add_argument("--configs-sweep", default="0,1,4,8")
+    parser.add_argument(
+        "--configs-sweep",
+        default=None,
+        help="Legacy. Comma-separated distinct_configs counts (0/1/4/8) "
+             "translated to disabled/inline_shared/per_request_N modes.  "
+             "Prefer --modes for new runs.",
+    )
+    parser.add_argument(
+        "--modes",
+        default=None,
+        help="Comma-separated mode list.  See bench_latency.run_mode for "
+             "the catalog (disabled, enabled_idle, inline_shared, "
+             "inline_unique, named_shared, per_request_N).  Mutually "
+             "exclusive with --configs-sweep.",
+    )
+    parser.add_argument(
+        "--num-hooks",
+        type=int,
+        default=1,
+        help="Number of hook points to populate per request (1..3).",
+    )
+    parser.add_argument(
+        "--num-layers-steered",
+        type=int,
+        default=None,
+        help="Number of layers to steer (defaults to all model layers).",
+    )
     parser.add_argument(
         "--max-steering-configs",
         type=int,
         default=None,
         help="Override auto-computed max_steering_configs. "
-             "Default = max(distinct_configs, 4). Use this to test if a "
-             "larger table reduces thrashing with a fixed workload.",
+             "Default = mode-derived (≥ batch×2 for inline_unique).",
     )
     parser.add_argument(
         "--disable-prefix-cache",
@@ -173,19 +324,37 @@ def main():
     parser.add_argument("--tag", default="")
     args = parser.parse_args()
 
-    config_counts = [int(x) for x in args.configs_sweep.split(",")]
+    if args.modes and args.configs_sweep:
+        parser.error("Pass exactly one of --modes / --configs-sweep")
+    if args.modes:
+        modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    elif args.configs_sweep:
+        modes = [
+            _legacy_mode_for_distinct(int(x))
+            for x in args.configs_sweep.split(",")
+        ]
+    else:
+        # Default sweep covers the new modes plus the original config sweep.
+        modes = [
+            "disabled",
+            "enabled_idle",
+            "inline_shared",
+            "inline_unique",
+            "named_shared",
+            "per_request_4",
+        ]
     config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
 
     print(f"Throughput benchmark: {args.model}")
     print(f"Prompts: {args.num_prompts}, prompt_len: {args.prompt_len}, max_tokens: {args.max_tokens}")
-    print(f"Config counts to test: {config_counts}")
+    print(f"Modes: {modes}")
     print()
 
     all_results = []
     baseline_throughput = None
 
-    for distinct_configs in config_counts:
-        print(f"\n--- distinct_configs={distinct_configs} ---")
+    for mode in modes:
+        print(f"\n--- mode={mode} ---")
 
         try:
             result = run_throughput(
@@ -193,13 +362,15 @@ def main():
                 num_prompts=args.num_prompts,
                 prompt_len=args.prompt_len,
                 max_tokens=args.max_tokens,
-                distinct_configs=distinct_configs,
+                mode=mode,
                 warmup=args.warmup,
                 iters=args.iters,
                 hidden_size=config["hidden_size"],
                 num_layers=config["num_layers"],
                 max_steering_configs_override=args.max_steering_configs,
                 enable_prefix_caching=not args.disable_prefix_cache,
+                num_hooks=args.num_hooks,
+                num_layers_steered=args.num_layers_steered,
             )
 
             mean_tps = result["throughput_tokens_per_sec"]["mean_tps"]
@@ -207,7 +378,7 @@ def main():
             print(f"    throughput: {mean_tps:.0f} tokens/sec")
             print(f"    batch latency: {mean_latency:.0f} ms")
 
-            if distinct_configs == 0:
+            if mode == "disabled":
                 baseline_throughput = mean_tps
 
             overhead_pct = None
@@ -220,19 +391,20 @@ def main():
             result = {"error": "OOM"}
             overhead_pct = None
 
-        effective_max_configs = (
-            args.max_steering_configs
-            if args.max_steering_configs is not None
-            else (max(distinct_configs, 4) if distinct_configs > 0 else 4)
-        )
         params = {
             "model": args.model,
-            "distinct_configs": distinct_configs,
-            "max_steering_configs": effective_max_configs,
+            "mode": mode,
+            "max_steering_configs_override": args.max_steering_configs,
             "num_prompts": args.num_prompts,
             "prompt_len": args.prompt_len,
             "max_tokens": args.max_tokens,
             "prefix_caching": not args.disable_prefix_cache,
+            "num_hooks": args.num_hooks,
+            "num_layers_steered": (
+                args.num_layers_steered
+                if args.num_layers_steered is not None
+                else config["num_layers"]
+            ),
         }
         results_out = {k: v for k, v in result.items() if k != "samples_ms"}
         if overhead_pct is not None:
@@ -247,7 +419,7 @@ def main():
             raw_samples_ms=result.get("samples_ms"),
         )
         all_results.append({
-            "distinct_configs": distinct_configs,
+            "mode": mode,
             "results": results_out,
         })
 
@@ -255,18 +427,18 @@ def main():
     print(f"\n{'=' * 80}")
     print(f"  Throughput Benchmark Summary: {args.model}")
     print(f"{'=' * 80}")
-    print(f"{'configs':>10} {'tokens/sec':>14} {'batch_ms':>12} {'loss':>10}")
+    print(f"{'mode':>20} {'tokens/sec':>14} {'batch_ms':>12} {'loss':>10}")
     print(f"{'-' * 80}")
     for r in all_results:
         res = r["results"]
         if "error" in res:
-            print(f"{r['distinct_configs']:>10} {'OOM':>14}")
+            print(f"{r['mode']:>20} {'OOM':>14}")
             continue
         tps = res["throughput_tokens_per_sec"]["mean_tps"]
         lat = res["latency_ms"]["mean_ms"]
         loss = res.get("throughput_loss_pct")
         loss_str = f"{loss:.1f}%" if loss is not None else "baseline"
-        print(f"{r['distinct_configs']:>10} {tps:>14.0f} {lat:>12.0f} {loss_str:>10}")
+        print(f"{r['mode']:>20} {tps:>14.0f} {lat:>12.0f} {loss_str:>10}")
     print(f"{'=' * 80}")
     print(f"Results written to {args.output_dir}")
 
