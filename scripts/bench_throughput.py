@@ -118,7 +118,12 @@ def run_throughput(
             n = int(suffix)
         except ValueError:
             n = 4
-        max_steering = max(n * 2, 8)
+        # Active table needs to hold both the inline-packed first sights
+        # AND the auto-promoted named-resolved copies of each spec (same
+        # vectors, separate table slots until first-sight requests drain),
+        # so 2N at minimum.  Add headroom for in-flight transitions and
+        # for the disabled-mode max=4 floor.
+        max_steering = max(n * 4, 16)
     else:
         max_steering = 4
 

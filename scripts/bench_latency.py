@@ -136,7 +136,9 @@ def run_mode(
 
     enable_steering = mode != "disabled"
     if mode == "per_request_4":
-        max_configs = 8
+        # 4 inline first-sight slots + 4 auto-promoted named slots +
+        # headroom for in-flight transitions.
+        max_configs = 16
     elif mode == "inline_unique":
         # Every request submits a fresh spec; the worker table needs to
         # hold at least the per-iter unique count, plus headroom across
