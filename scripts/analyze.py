@@ -1229,10 +1229,19 @@ def plot_library_comparison(df: pd.DataFrame, output_dir: Path, fmt: str) -> Non
 
 
 def _modes_matrix_subset(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter the aggregated frame to ``vllm.steering_modes_matrix`` rows."""
+    """Filter the aggregated frame to *successful* ``vllm.steering_modes_matrix``
+    rows.
+
+    Drops error records (``result_error`` set) so that a re-run of a
+    previously-failed cell — same params, different result — doesn't
+    pin the ``iloc[0]`` lookup to the error row.
+    """
     if df.empty or "benchmark" not in df.columns:
         return df.iloc[0:0]
-    return df[df["benchmark"] == "vllm.steering_modes_matrix"]
+    sub = df[df["benchmark"] == "vllm.steering_modes_matrix"]
+    if "result_error" in sub.columns:
+        sub = sub[sub["result_error"].isna() | (sub["result_error"] == "")]
+    return sub
 
 
 # Stable ordering for the mode axis — the keys plotted match
@@ -1308,8 +1317,8 @@ def plot_steering_modes_matrix(
             & (sub["param_prompt_len"] == plen)
         ]
         for metric_row, (metric, ylabel) in enumerate([
-            ("latency_ms.mean_ms", "batch latency (ms)"),
-            ("throughput_tokens_per_sec.mean_tps", "throughput (tok/s)"),
+            ("result_latency_ms_mean_ms", "batch latency (ms)"),
+            ("result_throughput_tokens_per_sec_mean_tps", "throughput (tok/s)"),
         ]):
             ax = axes[metric_row][col]
             for mode in modes:
@@ -1366,7 +1375,7 @@ def print_steering_modes_matrix_summary(df: pd.DataFrame) -> None:
         "param_num_hooks",
         "param_num_layers_steered",
         "param_prompt_len",
-        "latency_ms.mean_ms",
+        "result_latency_ms_mean_ms",
     }
     if not needed.issubset(sub.columns):
         return
@@ -1379,7 +1388,7 @@ def print_steering_modes_matrix_summary(df: pd.DataFrame) -> None:
         sub[["param_num_hooks", "param_num_layers_steered", "param_prompt_len"]]
         .drop_duplicates()
         .sort_values(by=list(needed - {"param_mode", "param_batch_size",
-                                       "latency_ms.mean_ms"}))
+                                       "result_latency_ms_mean_ms"}))
         .values.tolist()
     )
 
@@ -1409,10 +1418,10 @@ def print_steering_modes_matrix_summary(df: pd.DataFrame) -> None:
                     (panel["param_mode"] == mode)
                     & (panel["param_batch_size"] == b)
                 ]
-                if cell.empty or pd.isna(cell.iloc[0]["latency_ms.mean_ms"]):
+                if cell.empty or pd.isna(cell.iloc[0]["result_latency_ms_mean_ms"]):
                     row += f"{'—':>10}"
                 else:
-                    row += f"{cell.iloc[0]['latency_ms.mean_ms']:>10.1f}"
+                    row += f"{cell.iloc[0]['result_latency_ms_mean_ms']:>10.1f}"
             print(row)
 
         # Specifically call out the inline_shared vs named_shared gap.
@@ -1430,8 +1439,8 @@ def print_steering_modes_matrix_summary(df: pd.DataFrame) -> None:
                 if a_row.empty or n_row.empty:
                     print(f"{'—':>10}", end="")
                     continue
-                a = a_row.iloc[0]["latency_ms.mean_ms"]
-                n = n_row.iloc[0]["latency_ms.mean_ms"]
+                a = a_row.iloc[0]["result_latency_ms_mean_ms"]
+                n = n_row.iloc[0]["result_latency_ms_mean_ms"]
                 if pd.isna(a) or pd.isna(n) or n <= 0:
                     print(f"{'—':>10}", end="")
                 else:
