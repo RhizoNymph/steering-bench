@@ -60,6 +60,43 @@ For each max_configs in [0, 4, 8, 16, 32]:
   write_result("vllm.memory", ...)
 ```
 
+### bench_steering_with_capture.py
+```
+For each steering_mode in [disabled, enabled_idle, per_request_1, per_request_4]:
+  For each capture_mode in [cap_off, cap_on_idle, cap_on_active]:
+    For each batch_size:
+      In a fresh subprocess (run_in_subprocess):
+        Load vllm.LLM(enable_steering=..., capture_consumers=...)
+        Build SamplingParams with optional steering_vectors and optional
+          per-request capture={"logging": {...}}
+        Warmup: 3 generate() calls
+        Measure: 10 generate() calls, wall-clock each
+      Compute overhead_pct vs cap_off (per-steering-mode baseline)
+      write_result("vllm.steering_with_capture", ...)
+```
+
+Capture modes:
+- `cap_off`: no consumers, capture system inactive (cold path; the
+  `maybe_capture_residual` gate is supposed to constant-fold out of the
+  compiled graph)
+- `cap_on_idle`: a logging consumer registered globally on (post_mlp,
+  layer L) but no per-request `capture` field — manager installed but
+  no per-request work
+- `cap_on_active`: same logging consumer + per-request
+  `capture={"logging": {...}}` so the manager actually gathers and
+  dispatches a row per request
+
+Each (steering_mode, batch_size) cell uses cap_off as its baseline; the
+overhead_pct column reports cap_on_idle / cap_on_active relative to
+cap_off at the same steering_mode and batch_size. This isolates the
+"does enabling capture-consumers slow steering down?" question from the
+unrelated steering-vs-disabled question already covered by
+bench_latency.py.
+
+Subprocess isolation is on by default: vLLM's in-process teardown leaks
+weight memory, and a 4×3×N matrix rapidly OOMs without it. Pass
+`--no-subprocess` to opt out for small sweeps.
+
 ## Files
 
 | File | Purpose | Key CLI Args |
@@ -67,11 +104,17 @@ For each max_configs in [0, 4, 8, 16, 32]:
 | `scripts/bench_latency.py` | Latency overhead | `--model`, `--batch-sizes`, `--iters` |
 | `scripts/bench_throughput.py` | Throughput impact | `--model`, `--num-prompts`, `--configs-sweep` |
 | `scripts/bench_memory.py` | Memory cost | `--model`, `--configs-sweep` |
+| `scripts/bench_steering_with_capture.py` | Steering latency × capture-on/off | `--model`, `--steering-modes`, `--capture-modes`, `--capture-layer`, `--no-subprocess` |
 
 ## Invariants
 
 - bench_latency.py always runs `disabled` mode first to establish baseline
+- bench_steering_with_capture.py uses `cap_off` as the baseline for each
+  (steering_mode, batch_size) pair; if the user removes `cap_off` from
+  `--capture-modes` the overhead column is omitted rather than computed
+  against an arbitrary other capture mode
 - All scripts handle OOM gracefully (catch, report, continue)
-- Model is fully unloaded between configurations (gc.collect + cuda.empty_cache)
+- Model is fully unloaded between configurations (gc.collect + cuda.empty_cache;
+  bench_steering_with_capture additionally runs each cell in a fresh subprocess)
 - Default model is google/gemma-3-4b-it (hidden_size=2560, num_layers=34)
 - Latency measured with wall-clock (time.perf_counter) since LLM.generate() handles GPU sync

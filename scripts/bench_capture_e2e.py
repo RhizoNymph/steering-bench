@@ -70,7 +70,7 @@ def _run_config(
 ) -> dict:
     from vllm import LLM, SamplingParams
 
-    prompts = make_prompts(batch_size, prompt_len)
+    prompts = make_prompts(batch_size, prompt_len, model=model)
     sp = SamplingParams(max_tokens=output_len, temperature=0.0, **sampling_params_override)
     sp_list = [sp] * batch_size
 
@@ -195,14 +195,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="Benchmark LLM.generate() throughput with/without capture consumers"
     )
-    parser.add_argument("--model", default="facebook/opt-125m")
+    parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument(
         "--batch-sizes", default="1,8,32",
         help="Comma-separated batch sizes"
     )
     parser.add_argument("--output-len", type=int, default=64)
     parser.add_argument("--prompt-len", type=int, default=64)
-    parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--warmup", type=int, default=4)
     parser.add_argument("--iters", type=int, default=5)
     parser.add_argument("--output-dir", default="results/capture/")
     parser.add_argument("--tag", default="")

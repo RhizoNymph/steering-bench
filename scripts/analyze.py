@@ -1225,6 +1225,251 @@ def plot_library_comparison(df: pd.DataFrame, output_dir: Path, fmt: str) -> Non
     _save(fig, output_dir / f"library_comparison.{fmt}", f"library_comparison.{fmt}")
 
 
+# ── Steering modes matrix ────────────────────────────────────────────────────
+
+
+def _modes_matrix_subset(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter the aggregated frame to *successful* ``vllm.steering_modes_matrix``
+    rows.
+
+    Drops error records (``result_error`` set) so that a re-run of a
+    previously-failed cell — same params, different result — doesn't
+    pin the ``iloc[0]`` lookup to the error row.
+    """
+    if df.empty or "benchmark" not in df.columns:
+        return df.iloc[0:0]
+    sub = df[df["benchmark"] == "vllm.steering_modes_matrix"]
+    if "result_error" in sub.columns:
+        sub = sub[sub["result_error"].isna() | (sub["result_error"] == "")]
+    return sub
+
+
+# Stable ordering for the mode axis — the keys plotted match
+# bench_steering_modes_matrix.py.  Anything outside this list lands at the
+# end of the legend.
+_MODE_ORDER = [
+    "disabled",
+    "enabled_idle",
+    "named_shared",
+    "inline_shared",
+    "per_request_4",
+    "inline_unique",
+]
+
+
+def _sort_modes(modes: list[str]) -> list[str]:
+    known = [m for m in _MODE_ORDER if m in modes]
+    extra = sorted(m for m in modes if m not in _MODE_ORDER)
+    return known + extra
+
+
+def plot_steering_modes_matrix(
+    df: pd.DataFrame, output_dir: Path, fmt: str
+) -> None:
+    """Plot the modes-matrix bench: latency + throughput vs batch size,
+    one panel per (num_hooks, num_layers_steered, prompt_len) cell.
+
+    Each panel has one line per mode; this lets reviewers see at a
+    glance how each mode scales and where ``inline_shared`` (auto-promoted)
+    converges with ``named_shared``.
+    """
+    sub = _modes_matrix_subset(df)
+    if sub.empty:
+        return
+
+    # Required columns — bail if the bench schema we expect is missing.
+    needed = {
+        "param_mode",
+        "param_batch_size",
+        "param_num_hooks",
+        "param_num_layers_steered",
+        "param_prompt_len",
+    }
+    if not needed.issubset(sub.columns):
+        return
+
+    # Sort panels by (prompt_len, num_layers_steered, num_hooks) so the
+    # grid lines up rows by prompt and columns by hooks.
+    panel_sort = (
+        sub[["param_num_hooks", "param_num_layers_steered", "param_prompt_len"]]
+        .drop_duplicates()
+        .sort_values(
+            by=["param_prompt_len", "param_num_layers_steered", "param_num_hooks"]
+        )
+        .values.tolist()
+    )
+    if not panel_sort:
+        return
+
+    prompts = sorted({plen for _, _, plen in panel_sort})
+    hooks_axis = sorted({h for h, _, _ in panel_sort})
+    layers_axis = sorted({l for _, l, _ in panel_sort})
+
+    n_rows = len(prompts) * len(layers_axis)
+    n_cols = len(hooks_axis)
+
+    modes = _sort_modes(sub["param_mode"].dropna().unique().tolist())
+    cmap = plt.get_cmap("tab10")
+    color = {m: cmap(i % 10) for i, m in enumerate(modes)}
+
+    # Two figures: one for batch latency, one for throughput.  Keeps each
+    # readable instead of squashing both metrics into a wider grid.
+    metrics = [
+        ("result_latency_ms_mean_ms", "batch latency (ms)", "latency"),
+        (
+            "result_throughput_tokens_per_sec_mean_tps",
+            "throughput (tok/s)", "throughput",
+        ),
+    ]
+
+    for metric, ylabel, suffix in metrics:
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(max(3.5 * n_cols, 6), max(3 * n_rows, 4)),
+            sharex="col",
+            squeeze=False,
+        )
+
+        for row, (plen, layers) in enumerate(
+            (p, l) for p in prompts for l in layers_axis
+        ):
+            for col, hooks in enumerate(hooks_axis):
+                panel_rows = sub[
+                    (sub["param_num_hooks"] == hooks)
+                    & (sub["param_num_layers_steered"] == layers)
+                    & (sub["param_prompt_len"] == plen)
+                ]
+                ax = axes[row][col]
+                for mode in modes:
+                    m_rows = panel_rows[panel_rows["param_mode"] == mode]
+                    if m_rows.empty or metric not in m_rows.columns:
+                        continue
+                    m_rows = m_rows.sort_values("param_batch_size")
+                    ax.plot(
+                        m_rows["param_batch_size"],
+                        m_rows[metric],
+                        marker="o", linewidth=1.5,
+                        color=color[mode], label=mode,
+                    )
+                ax.set_xscale("log", base=2)
+                ax.grid(True, alpha=0.3)
+                ax.set_title(
+                    f"prompt={int(plen)}  layers={layers}  hooks={int(hooks)}",
+                    fontsize=9,
+                )
+                if col == 0:
+                    ax.set_ylabel(ylabel, fontsize=9)
+                if row == n_rows - 1:
+                    ax.set_xlabel("batch size", fontsize=9)
+
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        if handles:
+            fig.legend(
+                handles, labels,
+                loc="upper center", ncol=min(len(labels), 6),
+                bbox_to_anchor=(0.5, 1.0),
+            )
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+        _save(
+            fig,
+            output_dir / f"steering_modes_matrix_{suffix}.{fmt}",
+            f"steering_modes_matrix_{suffix}.{fmt}",
+        )
+
+
+def print_steering_modes_matrix_summary(df: pd.DataFrame) -> None:
+    """Text comparison table for the modes-matrix bench.
+
+    Highlights the gaps relevant to PR #145 (auto-promote): the ratio of
+    ``inline_shared`` to ``named_shared`` should approach 1.0 (closed),
+    and the gap between ``inline_unique`` and the no-promote baseline
+    is the residual research-workload overhead.
+    """
+    sub = _modes_matrix_subset(df)
+    if sub.empty:
+        return
+    needed = {
+        "param_mode",
+        "param_batch_size",
+        "param_num_hooks",
+        "param_num_layers_steered",
+        "param_prompt_len",
+        "result_latency_ms_mean_ms",
+    }
+    if not needed.issubset(sub.columns):
+        return
+
+    print(f"\n{'=' * 90}")
+    print("  STEERING MODES MATRIX")
+    print(f"{'=' * 90}")
+
+    cells = (
+        sub[["param_num_hooks", "param_num_layers_steered", "param_prompt_len"]]
+        .drop_duplicates()
+        .sort_values(by=list(needed - {"param_mode", "param_batch_size",
+                                       "result_latency_ms_mean_ms"}))
+        .values.tolist()
+    )
+
+    for hooks, layers, plen in cells:
+        panel = sub[
+            (sub["param_num_hooks"] == hooks)
+            & (sub["param_num_layers_steered"] == layers)
+            & (sub["param_prompt_len"] == plen)
+        ]
+        if panel.empty:
+            continue
+        print(
+            f"\n  hooks={int(hooks)}  layers_steered={int(layers)}  "
+            f"prompt_len={int(plen)}"
+        )
+        modes = _sort_modes(panel["param_mode"].dropna().unique().tolist())
+        batches = sorted(panel["param_batch_size"].dropna().unique())
+        # Header.
+        head = f"    {'mode':<18}" + "".join(f"{int(b):>10}" for b in batches)
+        print(head)
+        print(f"    {'-' * (18 + 10 * len(batches))}")
+        # Disabled-baseline row first if present.
+        for mode in modes:
+            row = f"    {mode:<18}"
+            for b in batches:
+                cell = panel[
+                    (panel["param_mode"] == mode)
+                    & (panel["param_batch_size"] == b)
+                ]
+                if cell.empty or pd.isna(cell.iloc[0]["result_latency_ms_mean_ms"]):
+                    row += f"{'—':>10}"
+                else:
+                    row += f"{cell.iloc[0]['result_latency_ms_mean_ms']:>10.1f}"
+            print(row)
+
+        # Specifically call out the inline_shared vs named_shared gap.
+        if "inline_shared" in modes and "named_shared" in modes:
+            print(f"    {'inline/named':<18}", end="")
+            for b in batches:
+                a_row = panel[
+                    (panel["param_mode"] == "inline_shared")
+                    & (panel["param_batch_size"] == b)
+                ]
+                n_row = panel[
+                    (panel["param_mode"] == "named_shared")
+                    & (panel["param_batch_size"] == b)
+                ]
+                if a_row.empty or n_row.empty:
+                    print(f"{'—':>10}", end="")
+                    continue
+                a = a_row.iloc[0]["result_latency_ms_mean_ms"]
+                n = n_row.iloc[0]["result_latency_ms_mean_ms"]
+                if pd.isna(a) or pd.isna(n) or n <= 0:
+                    print(f"{'—':>10}", end="")
+                else:
+                    print(f"{a / n:>10.3f}", end="")
+            print()
+
+    print(f"\n{'=' * 90}")
+
+
 # ── Text summary ──────────────────────────────────────────────────────────────
 
 
@@ -1488,8 +1733,12 @@ def main():
     # External comparison
     plot_library_comparison(df, output_dir, args.format)
 
+    # Modes matrix
+    plot_steering_modes_matrix(df, output_dir, args.format)
+
     # Text summary
     print_text_summary(df)
+    print_steering_modes_matrix_summary(df)
 
     # Export aggregated CSV for manual exploration
     csv_path = output_dir / "all_results.csv"

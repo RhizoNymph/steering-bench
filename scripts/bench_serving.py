@@ -311,6 +311,9 @@ async def run_mode(
     return s
 
 
+NAMED_BENCH_MODULE = "bench_named_shared"
+
+
 def build_extra_bodies(
     num_prompts: int,
     mode: str,
@@ -321,9 +324,46 @@ def build_extra_bodies(
         return [None] * num_prompts
     if mode == "all_steered_shared":
         return [{"steering_vectors": shared_vectors}] * num_prompts
+    if mode == "named_shared":
+        # Server-side named module pre-registered via
+        # /v1/steering/modules/register; only the name (16 bytes-ish) rides
+        # the wire per request.
+        return [{"steering_name": NAMED_BENCH_MODULE}] * num_prompts
     # per_request_nK
     k = len(diverse_vectors)
     return [{"steering_vectors": diverse_vectors[i % k]} for i in range(num_prompts)]
+
+
+async def register_named_module(
+    base_url: str,
+    name: str,
+    vectors: dict,
+    timeout: float = 60.0,
+) -> None:
+    """POST a named steering module to the server's dev-mode registry.
+
+    Requires the server to have been launched with
+    ``VLLM_SERVER_DEV_MODE=1`` so
+    ``vllm.entrypoints.serve.steering.modules_router`` is attached.
+    """
+    import httpx
+
+    url = base_url.rstrip("/").removesuffix("/v1")
+    endpoint = f"{url}/v1/steering/modules/register"
+    payload = {
+        "name": name,
+        "vectors": vectors,
+        "prefill_vectors": None,
+        "decode_vectors": None,
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(endpoint, json=payload)
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"register_named_module(name={name}) failed: "
+                f"{r.status_code} {r.text}"
+            )
+        print(f"[server] registered named module: {name}")
 
 
 def main() -> None:
@@ -349,8 +389,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--modes",
-        default="disabled,enabled_idle,all_steered_shared,per_request_n4,per_request_n16",
-        help="Comma-separated subset of modes to run",
+        default="disabled,enabled_idle,named_shared,all_steered_shared,per_request_n4,per_request_n16",
+        help="Comma-separated subset of modes to run.  named_shared "
+             "pre-registers a single module via "
+             "POST /v1/steering/modules/register and references it from "
+             "every request — the floor for the spec-reuse case.",
     )
     args = parser.parse_args()
 
@@ -359,6 +402,7 @@ def main() -> None:
         "disabled",
         "enabled_idle",
         "all_steered_shared",
+        "named_shared",
         "per_request_n4",
         "per_request_n16",
     }
@@ -470,6 +514,11 @@ def main() -> None:
     # Phase 2: enable-steering server (reused across remaining modes)
     steered_modes = [m for m in modes if m != "disabled"]
     if steered_modes:
+        # named_shared needs the dev-mode admin endpoint to register
+        # the module before requests reference it.
+        steered_env = os.environ.copy()
+        if "named_shared" in steered_modes:
+            steered_env["VLLM_SERVER_DEV_MODE"] = "1"
         proc = launch_server(
             python_bin=args.python_bin,
             model=args.model,
@@ -484,10 +533,15 @@ def main() -> None:
                 str(args.gpu_memory_utilization),
             ],
             log_path=log_dir / "vllm_serving_enabled.log",
+            env=steered_env,
         )
         try:
             asyncio.run(wait_for_server(base_url, args.startup_timeout))
             print(f"\n[phase 2/2] enable_steering, max_configs={args.max_steering_configs}")
+            if "named_shared" in steered_modes:
+                asyncio.run(
+                    register_named_module(base_url, NAMED_BENCH_MODULE, shared)
+                )
             for mode in steered_modes:
                 extra = build_extra_bodies(
                     args.num_prompts,

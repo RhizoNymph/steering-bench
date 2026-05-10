@@ -44,9 +44,15 @@ All results share a common JSON schema with environment metadata, parameters, an
 
 ### vllm_benchmarks
 - description: End-to-end vLLM system benchmarks (latency, throughput, memory)
-- entry_points: [scripts/bench_latency.py, scripts/bench_throughput.py, scripts/bench_memory.py]
+- entry_points: [scripts/bench_latency.py, scripts/bench_throughput.py, scripts/bench_memory.py, scripts/bench_steering_with_capture.py]
 - depends_on: [core]
 - doc: docs/features/vllm_benchmarks.md
+
+### steering_modes_matrix
+- description: Cross-product bench of steering modes (named_shared, inline_shared, inline_unique, per_request_4, enabled_idle, disabled) × {batch_size, num_hooks, layer_subset, prompt_len}.  One sweep produces the comparison data for "did the new optimizations close the gap?"
+- entry_points: [scripts/bench_steering_modes_matrix.py]
+- depends_on: [core, vllm_benchmarks]
+- doc: docs/features/steering_modes_matrix.md
 
 ### ablation_benchmarks
 - description: Optimization interaction tests (CUDA graphs, config scaling, hook points)
