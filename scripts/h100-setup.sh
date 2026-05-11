@@ -68,7 +68,7 @@ fi
 source .venv/bin/activate
 
 # vllm fork first (Python-only changes — skip the C++ rebuild).
-VLLM_USE_PRECOMPILED=1 uv pip install -e /home/nymph/Code/vllm \
+VLLM_USE_PRECOMPILED=1 uv pip install -e /workspace/vllm \
     --torch-backend=auto
 
 # steering-bench (depends on vllm).
