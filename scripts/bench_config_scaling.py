@@ -84,8 +84,14 @@ def run_config(
 
     prompts = make_prompts(batch_size, prompt_len)
 
-    # Use as many distinct configs as the table allows (up to batch_size)
-    actual_distinct = min(max_configs, batch_size)
+    # Use as many distinct configs as the table allows. Strict capacity:
+    # each logical hash uses one row per phase (prefill, decode), so the
+    # worker can hold at most `max_configs // 2` distinct hashes when
+    # both phases are active. Going above that limit crashes the engine
+    # at the first prefill->decode transition with "No free steering
+    # table rows". `max(1, ...)` keeps max_configs=2 a valid sweep entry
+    # (1 distinct hash, 2 phases, fits exactly).
+    actual_distinct = min(max(1, max_configs // 2), batch_size)
     diverse = random_steering_vectors_diverse(
         hidden_size=hidden_size,
         num_layers=num_layers,
