@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Ablation benchmark: max_steering_configs scaling.
 
-1x6 sweep: max_steering_configs in [1, 2, 4, 8, 16, 32]
+1x5 sweep: max_steering_configs in [2, 4, 8, 16, 32]
 with fixed batch size to isolate table-size overhead.
 
 Key question: does overhead scale with max_steering_configs, or stay flat?
+
+Note: max_steering_configs=1 is omitted because the worker's strict
+capacity contract allocates a separate table row per (hash, phase) pair.
+A workload with both prefill and decode steering on a single hash needs
+at least 2 row slots, so max_steering_configs=1 raises
+"No free steering table rows" at the first prefill→decode transition.
 """
 
 from __future__ import annotations
@@ -131,7 +137,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--prompt-len", type=int, default=64)
-    parser.add_argument("--configs-sweep", default="1,2,4,8,16,32")
+    parser.add_argument("--configs-sweep", default="2,4,8,16,32")
     parser.add_argument("--tag", default="")
     args = parser.parse_args()
 
