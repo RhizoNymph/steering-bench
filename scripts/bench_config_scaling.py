@@ -79,6 +79,20 @@ def run_config(
         max_model_len=2048,
     )
 
+    # Disable auto-promote (vLLM PR #145).  Auto-promote registers an
+    # anonymous named module on the second sighting of an inline spec
+    # and rewrites subsequent requests to use ``steering_module_ref``.
+    # The (name, scale) tuple folds into the request hash, so within a
+    # single batch the first request stays inline (hash H_inline) while
+    # the rest become module-ref'd (hash H_module).  Two distinct hashes
+    # under the strict-capacity contract need 2 prefill + 2 decode rows
+    # transiently during the prefill->decode transition, which the
+    # smallest sweep values cannot accommodate.  This bench measures
+    # table-size scaling, not auto-promote behavior — turn it off so
+    # the shared-spec workload stays as one logical hash.
+    if hasattr(llm, "_maybe_auto_promote_steering"):
+        llm._maybe_auto_promote_steering = lambda sp: None
+
     # Memory after model load — use mem_get_info to see subprocess allocations
     allocated_mb = _gpu_used_mb()
 
