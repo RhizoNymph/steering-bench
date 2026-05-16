@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Ablation benchmark: max_steering_configs scaling.
 
-1x6 sweep: max_steering_configs in [1, 2, 4, 8, 16, 32]
+1x5 sweep: max_steering_configs in [2, 4, 8, 16, 32]
 with fixed batch size to isolate table-size overhead.
 
 Key question: does overhead scale with max_steering_configs, or stay flat?
+
+Note: max_steering_configs=1 is omitted because the worker's strict
+capacity contract allocates a separate table row per (hash, phase) pair.
+A workload with both prefill and decode steering on a single hash needs
+at least 2 row slots, so max_steering_configs=1 raises
+"No free steering table rows" at the first prefill→decode transition.
 """
 
 from __future__ import annotations
@@ -73,13 +79,33 @@ def run_config(
         max_model_len=2048,
     )
 
+    # Disable auto-promote (vLLM PR #145).  Auto-promote registers an
+    # anonymous named module on the second sighting of an inline spec
+    # and rewrites subsequent requests to use ``steering_module_ref``.
+    # The (name, scale) tuple folds into the request hash, so within a
+    # single batch the first request stays inline (hash H_inline) while
+    # the rest become module-ref'd (hash H_module).  Two distinct hashes
+    # under the strict-capacity contract need 2 prefill + 2 decode rows
+    # transiently during the prefill->decode transition, which the
+    # smallest sweep values cannot accommodate.  This bench measures
+    # table-size scaling, not auto-promote behavior — turn it off so
+    # the shared-spec workload stays as one logical hash.
+    if hasattr(llm, "_maybe_auto_promote_steering"):
+        llm._maybe_auto_promote_steering = lambda sp: None
+
     # Memory after model load — use mem_get_info to see subprocess allocations
     allocated_mb = _gpu_used_mb()
 
     prompts = make_prompts(batch_size, prompt_len)
 
-    # Use as many distinct configs as the table allows (up to batch_size)
-    actual_distinct = min(max_configs, batch_size)
+    # Use as many distinct configs as the table allows. Strict capacity:
+    # each logical hash uses one row per phase (prefill, decode), so the
+    # worker can hold at most `max_configs // 2` distinct hashes when
+    # both phases are active. Going above that limit crashes the engine
+    # at the first prefill->decode transition with "No free steering
+    # table rows". `max(1, ...)` keeps max_configs=2 a valid sweep entry
+    # (1 distinct hash, 2 phases, fits exactly).
+    actual_distinct = min(max(1, max_configs // 2), batch_size)
     diverse = random_steering_vectors_diverse(
         hidden_size=hidden_size,
         num_layers=num_layers,
@@ -131,7 +157,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--prompt-len", type=int, default=64)
-    parser.add_argument("--configs-sweep", default="1,2,4,8,16,32")
+    parser.add_argument("--configs-sweep", default="2,4,8,16,32")
     parser.add_argument("--tag", default="")
     args = parser.parse_args()
 
