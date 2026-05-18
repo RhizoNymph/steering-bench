@@ -123,7 +123,59 @@ Takeaways for the RFC:
 - **named_shared also has no measurable TTFT cost vs disabled** (+0.0 ± 1.2 ms). The prematerialize (#161) + binary-wire (#162) combo eliminated the named-config setup tax — sending a named module reference is as cheap as sending a normal request.
 - **Inline modes have real, significant TTFT overhead**: +12-18 ms vs disabled. This is the "you pay for per-request vector materialization" cost. Bounded and predictable; absolute numbers ~44-50 ms are still well within latency budgets.
 - **TPOT delta is constant across modes** (+0.2 to +0.4 ms regardless of how many vectors are active). This is the headline claim for "per-token steering is free in steady state."
-- **Bimodal TTFT in low-cost modes**: the disabled / enabled_idle / named_shared TTFT distribution has two clusters ~6 ms apart. Mean-based statistics handle this; median-based statistics flip between clusters. **Don't quote `TTFT_p50` from this dataset for the low-overhead modes without the SEM context**, and don't quote `TTFT_p99` for disabled at all (SEM is ±15-30 ms — one or two trials per cluster have extreme tails). Bimodality root cause is uninvestigated (suspected CUDA graph capture non-determinism); it's a bench artifact, not a steering artifact.
+- **Bimodal TTFT in low-cost modes**: the disabled / enabled_idle / named_shared TTFT distribution has two clusters ~6 ms apart. Mean-based statistics handle this; median-based statistics flip between clusters. **Don't quote `TTFT_p50` from this dataset for the low-overhead modes without the SEM context**, and don't quote `TTFT_p99` for disabled at all (SEM is ±15-30 ms — one or two trials per cluster have extreme tails).
+
+  **Root cause is upstream vLLM, not steering.** A follow-up investigation
+  compared per-trial TTFT stddev across modes (from the per-trial
+  aggregate stats already in each JSON — the bench doesn't dump raw
+  per-request samples, so this is the strongest analysis without
+  re-instrumenting):
+
+  ```
+  mode                  N    mean within-trial p10-p90 spread
+  ───────────────────────────────────────────────────────────
+  disabled             18                              8.54 ms
+  enabled_idle          9                              8.80 ms
+  named_shared          9                              8.98 ms
+  all_steered_shared    9                             28.79 ms
+  per_request_n4        9                             36.85 ms
+  per_request_n16       9                             35.42 ms
+  ```
+
+  All three low-overhead modes have an essentially identical within-trial
+  TTFT spread of ~9 ms. Steering doesn't increase variance for these modes
+  — it just adds an offset (the +0.2 ms TPOT cost). The 6 ms gap between
+  the two trial-median clusters is a sampling artifact: each trial draws
+  128 requests from a distribution with an ~8 ms internal spread, and the
+  median of 128 lands at one cluster or the other depending on the random
+  per-trial mix.
+
+  Mean within-trial stddev (6.56 ms) > between-trial median stddev
+  (2.63 ms) confirms the bimodality is **request-level**, not trial-level
+  — it's not an unstable trial-start state, it's how vLLM's scheduler
+  dispatches requests inside a steady-state server.
+
+  Inline modes (`all_steered_shared`, `per_request_n*`) have 3-4× larger
+  within-trial spread (29-37 ms p10-p90), driven by per-request vector
+  materialization cost varying with payload size and timing. That spread
+  is a real steering property, not a sampling artifact.
+
+  Likely upstream causes (not pinned down, since vLLM-side investigation
+  is out of scope for the steering RFC):
+  1. Continuous-batching schedule-step boundaries — first request joining
+     a new step pays a small extra cost vs requests joining an in-flight
+     step. With concurrency=8 and a warmup drain, the first measured
+     wave hits a fresh step.
+  2. CUDA graph batch-size routing — vLLM compiles graphs for discrete
+     batch sizes (1, 2, 4, 8, …); actual composition fluctuates each
+     scheduler step.
+  3. Prefix-caching probe cost — `--prefix-caching=True` on the bench;
+     some requests hit a fresh cache, others reuse.
+
+  To pin the root cause definitively would require instrumenting
+  `bench_serving.py` to dump per-request TTFT samples (currently only
+  aggregates are stored), then correlating against vLLM scheduler logs.
+  Out of scope for this RFC.
 
 #### Cross-GPU absolute numbers (old N=3 3090 vs N=9 A100, kept for hardware-scaling context)
 
