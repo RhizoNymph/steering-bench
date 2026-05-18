@@ -614,6 +614,12 @@ def main() -> None:
         "If unset, synthetic prompts are used.",
     )
     parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Pass --enforce-eager to the vLLM server (disables CUDA graph "
+        "capture). Used to ablate graph speedup vs steering.",
+    )
+    parser.add_argument(
         "--modes",
         default="disabled,enabled_idle,named_shared,all_steered_shared,per_request_n4,per_request_n16",
         help="Comma-separated subset of modes to run.  named_shared "
@@ -709,7 +715,10 @@ def main() -> None:
         "warmup_drain_seconds": args.warmup_drain_seconds,
         "packed_vectors": args.packed_vectors,
         "packed_with_scales": args.packed_with_scales,
+        "enforce_eager": args.enforce_eager,
     }
+
+    eager_args = ["--enforce-eager"] if args.enforce_eager else []
 
     # Phase 1: disabled (needs its own server)
     if "disabled" in modes:
@@ -722,7 +731,7 @@ def main() -> None:
                 str(args.max_model_len),
                 "--gpu-memory-utilization",
                 str(args.gpu_memory_utilization),
-            ],
+            ] + eager_args,
             log_path=log_dir / "vllm_serving_disabled.log",
         )
         try:
@@ -774,7 +783,7 @@ def main() -> None:
                 str(args.max_model_len),
                 "--gpu-memory-utilization",
                 str(args.gpu_memory_utilization),
-            ],
+            ] + eager_args,
             log_path=log_dir / "vllm_serving_enabled.log",
             env=steered_env,
         )
