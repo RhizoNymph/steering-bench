@@ -380,14 +380,14 @@ def pack_steering_vectors(vecs: dict, with_scales: bool = False) -> dict:
     """Convert a dict[hook, dict[layer, list[float]]] to the binary wire
     form used by vllm.config.steering_types.SteeringHookPacked.
 
-    Used only when --packed-vectors is set on the bench. Server-side
-    decode requires a vllm build that includes the binary-wire support
-    (perf/steering-binary-wire or later).
+    The HTTP steering fields (``steering_vectors`` / ``prefill_*`` /
+    ``decode_*``) accept only this packed shape — the legacy
+    list-of-floats JSON form is rejected at pydantic validation
+    server-side, so every inline-vector request must be packed.
 
     When *with_scales* is True, attach a deterministic per-layer ``scales``
     list (varies row to row, all != 1.0) so the server exercises the
-    per-row multiply path in ``unpack_steering_vectors``. Requires PR
-    #163 (per-layer scales in binary wire) server-side.
+    per-row multiply path in ``unpack_steering_vectors``.
     """
     import base64
     import numpy as np
@@ -436,19 +436,14 @@ def build_extra_bodies(
     mode: str,
     shared_vectors,
     diverse_vectors: list,
-    packed: bool = False,
     packed_with_scales: bool = False,
 ) -> list[dict | None]:
     if mode in ("disabled", "enabled_idle"):
         return [None] * num_prompts
-    field = "steering_vectors_packed" if packed else "steering_vectors"
-    if packed:
-        pack = lambda v: pack_steering_vectors(v, with_scales=packed_with_scales)
-    else:
-        pack = lambda v: v
+    pack = lambda v: pack_steering_vectors(v, with_scales=packed_with_scales)
     if mode == "all_steered_shared":
         packed_shared = pack(shared_vectors)
-        return [{field: packed_shared}] * num_prompts
+        return [{"steering_vectors": packed_shared}] * num_prompts
     if mode == "named_shared":
         # Server-side named module pre-registered via
         # /v1/steering/modules/register; only the name (16 bytes-ish) rides
@@ -458,7 +453,9 @@ def build_extra_bodies(
     # repeated cycling doesn't re-encode bytes.
     k = len(diverse_vectors)
     packed_diverse = [pack(v) for v in diverse_vectors]
-    return [{field: packed_diverse[i % k]} for i in range(num_prompts)]
+    return [
+        {"steering_vectors": packed_diverse[i % k]} for i in range(num_prompts)
+    ]
 
 
 async def dump_and_reset_steering_timings(
@@ -584,20 +581,12 @@ def main() -> None:
         help="max_tokens for each warmup request (default: 8).",
     )
     parser.add_argument(
-        "--packed-vectors",
-        action="store_true",
-        help="Send inline vectors via steering_vectors_packed (binary "
-        "wire format) instead of the legacy list-of-floats JSON form. "
-        "Requires a vllm build that supports the packed schema "
-        "(perf/steering-binary-wire or later). No-op for named_shared, "
-        "enabled_idle, and disabled modes.",
-    )
-    parser.add_argument(
         "--packed-with-scales",
         action="store_true",
-        help="When --packed-vectors is set, attach a deterministic "
-        "per-layer scales list to each packed hook so the server "
-        "exercises the per-row multiply path. Requires PR #163.",
+        help="Attach a deterministic per-layer scales list to each packed "
+        "hook so the server exercises the per-row multiply path in "
+        "unpack_steering_vectors. No-op for named_shared, enabled_idle, "
+        "and disabled modes.",
     )
     parser.add_argument(
         "--warmup-drain-seconds",
@@ -713,7 +702,6 @@ def main() -> None:
         "warmup_requests": warmup_requests,
         "warmup_max_tokens": args.warmup_max_tokens,
         "warmup_drain_seconds": args.warmup_drain_seconds,
-        "packed_vectors": args.packed_vectors,
         "packed_with_scales": args.packed_with_scales,
         "enforce_eager": args.enforce_eager,
     }
@@ -803,7 +791,6 @@ def main() -> None:
                     mode,
                     shared,
                     diverse_for_mode,
-                    packed=args.packed_vectors,
                     packed_with_scales=args.packed_with_scales,
                 )
                 mode_warmup = max(
