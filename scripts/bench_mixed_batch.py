@@ -54,18 +54,29 @@ def run_mixed(
     iters: int,
     hidden_size: int,
     num_layers: int,
+    distinct_vectors: bool = False,
+    max_steering_configs: int = 4,
 ) -> dict:
-    """Run a mixed batch: num_active of batch_size requests are steered."""
+    """Run a mixed batch: num_active of batch_size requests are steered.
+
+    When ``distinct_vectors`` is False (default) all active slots share
+    one steering vector and one SamplingParams — the common global-
+    steering-target case where hash caching amortizes across the batch.
+    When True, each active slot gets its own unique vector and its own
+    fresh SamplingParams — the personalization-style case where every
+    request hits the slow register_config new-row path.
+    """
     from vllm import LLM, SamplingParams
 
     print(
-        f"    Loading model (batch={batch_size}, active={num_active}/{batch_size})...",
+        f"    Loading model (batch={batch_size}, active={num_active}/{batch_size}, "
+        f"distinct={distinct_vectors})...",
         flush=True,
     )
     llm = LLM(
         model=model,
         enable_steering=True,
-        max_steering_configs=4,
+        max_steering_configs=max_steering_configs,
         gpu_memory_utilization=0.9,
         max_model_len=2048,
     )
@@ -75,9 +86,27 @@ def run_mixed(
     # Non-steered sampling params (no steering_vectors field)
     sp_unsteered = SamplingParams(max_tokens=max_tokens, temperature=0.0)
 
-    # Steered sampling params
-    if num_active > 0:
-        vectors = random_steering_vectors(
+    # Build the sp_list. Shared mode: one shared steered SP. Distinct mode:
+    # each active slot gets its own SP with a unique vector.
+    sp_list: list = []
+    if num_active > 0 and distinct_vectors:
+        for i in range(num_active):
+            v = random_steering_vectors(
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                hook_points=["post_mlp"],
+                scale=0.1,
+                seed=42 + i,
+            )
+            sp_list.append(
+                SamplingParams(
+                    max_tokens=max_tokens,
+                    temperature=0.0,
+                    steering_vectors=v,
+                )
+            )
+    elif num_active > 0:
+        shared_vectors = random_steering_vectors(
             hidden_size=hidden_size,
             num_layers=num_layers,
             hook_points=["post_mlp"],
@@ -87,18 +116,11 @@ def run_mixed(
         sp_steered = SamplingParams(
             max_tokens=max_tokens,
             temperature=0.0,
-            steering_vectors=vectors,
+            steering_vectors=shared_vectors,
         )
-    else:
-        sp_steered = None
+        sp_list = [sp_steered] * num_active
 
-    # First num_active items get steered SP, rest get unsteered SP
-    sp_list = []
-    for i in range(batch_size):
-        if i < num_active and sp_steered is not None:
-            sp_list.append(sp_steered)
-        else:
-            sp_list.append(sp_unsteered)
+    sp_list.extend([sp_unsteered] * (batch_size - num_active))
 
     # Warmup
     for _ in range(warmup):
@@ -157,6 +179,24 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--prompt-len", type=int, default=64)
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--distinct-vectors",
+        action="store_true",
+        help=(
+            "Give each active slot a distinct steering vector (and a "
+            "distinct SamplingParams instance). Default is shared-vector."
+        ),
+    )
+    parser.add_argument(
+        "--max-steering-configs",
+        type=int,
+        default=None,
+        help=(
+            "Override max_steering_configs. Default: 4 for shared-vector "
+            "runs, max(batch_size, 4) for distinct-vector runs so the "
+            "scheduler doesn't serialize on table capacity."
+        ),
+    )
     args = parser.parse_args()
 
     model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
@@ -167,8 +207,20 @@ def main():
     active_counts = sorted(set(active_counts))
     labels = {0: "none_active", bs: "all_active"}
 
+    # In distinct-vector mode each active slot needs its own table row.
+    # Size the table to at least batch_size so we never hit capacity.
+    if args.max_steering_configs is not None:
+        max_steering_configs = args.max_steering_configs
+    elif args.distinct_vectors:
+        max_steering_configs = max(bs, 4)
+    else:
+        max_steering_configs = 4
+
+    mode = "distinct-vector" if args.distinct_vectors else "shared-vector"
     print(f"Mixed-batch benchmark: {args.model}")
+    print(f"Mode: {mode}")
     print(f"Batch size: {bs}")
+    print(f"max_steering_configs: {max_steering_configs}")
     print(f"Active counts tested: {active_counts}")
     print()
 
@@ -195,6 +247,8 @@ def main():
                 iters=args.iters,
                 hidden_size=model_config["hidden_size"],
                 num_layers=model_config["num_layers"],
+                distinct_vectors=args.distinct_vectors,
+                max_steering_configs=max_steering_configs,
             )
             mean_ms = result["latency"]["mean_ms"]
             p90_ms = result["latency"]["p90_ms"]
@@ -222,6 +276,13 @@ def main():
             print(f"    OOM!")
             result = {"error": "OOM"}
 
+        if num_active == 0:
+            num_distinct = 0
+        elif args.distinct_vectors:
+            num_distinct = num_active
+        else:
+            num_distinct = 1
+
         params = {
             "model": args.model,
             "batch_size": bs,
@@ -229,6 +290,9 @@ def main():
             "active_fraction": num_active / bs if bs > 0 else 0,
             "prompt_len": args.prompt_len,
             "max_tokens": args.max_tokens,
+            "distinct_vectors": args.distinct_vectors,
+            "num_distinct_configs": num_distinct,
+            "max_steering_configs": max_steering_configs,
         }
         results_out: dict = {}
         if result and "error" not in result:

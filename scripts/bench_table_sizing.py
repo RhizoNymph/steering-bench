@@ -105,6 +105,32 @@ def main():
         default="8,16,32",
         help="Comma-separated batch sizes",
     )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help="Passed through to LLM(). Lower if you hit OOM during init.",
+    )
+    parser.add_argument(
+        "--skip-disabled",
+        action="store_true",
+        help=(
+            "Skip Phase 1 (disabled baseline). Use when splitting the run "
+            "across multiple invocations to work around in-process CUDA "
+            "allocator leaks — each invocation should do at most one model "
+            "load, because del/gc/empty_cache does not reliably return GPU "
+            "memory to the OS within a single Python process."
+        ),
+    )
+    parser.add_argument(
+        "--skip-steering",
+        action="store_true",
+        help=(
+            "Skip Phase 2 (steering sweep). Use to run ONLY the disabled "
+            "baseline. Pair with --skip-disabled on other invocations to "
+            "make each invocation load exactly one model."
+        ),
+    )
     parser.add_argument("--tag", default="table-sizing")
     args = parser.parse_args()
 
@@ -126,65 +152,75 @@ def main():
     # None values indicate the disabled baseline.
     results_map: dict = {}
 
-    # ── Phase 1: disabled baselines ─────────────────────────────────────────
     from vllm import LLM, SamplingParams
 
-    print("=" * 70)
-    print("  Phase 1: disabled baseline")
-    print("=" * 70)
-    print("  Loading model (enable_steering=False)...", flush=True)
-    llm = LLM(
-        model=args.model,
-        enable_steering=False,
-        gpu_memory_utilization=0.9,
-        max_model_len=2048,
-    )
+    if args.skip_disabled:
+        print("Skipping Phase 1 (disabled baseline) per --skip-disabled.")
+    else:
+        # ── Phase 1: disabled baselines ─────────────────────────────────────
+        print("=" * 70)
+        print("  Phase 1: disabled baseline")
+        print("=" * 70)
+        print("  Loading model (enable_steering=False)...", flush=True)
+        llm = LLM(
+            model=args.model,
+            enable_steering=False,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=2048,
+        )
 
-    sp_unsteered = SamplingParams(max_tokens=args.max_tokens, temperature=0.0)
-    for bs in batch_sizes:
-        prompts = make_prompts(bs, args.prompt_len)
-        sp_list = [sp_unsteered] * bs
-        print(f"\n  batch_size={bs}", flush=True)
-        try:
-            result = measure_one(
-                llm, prompts, sp_list, args.warmup, args.iters, args.prompt_len
-            )
-            lat = result["latency"]["mean_ms"]
-            tps = result["throughput"]["mean_tps"]
-            print(f"    disabled: latency={lat:.1f}ms throughput={tps:.0f} tok/s")
-            results_map[(0, bs, 0)] = result
+        sp_unsteered = SamplingParams(max_tokens=args.max_tokens, temperature=0.0)
+        for bs in batch_sizes:
+            prompts = make_prompts(bs, args.prompt_len)
+            sp_list = [sp_unsteered] * bs
+            print(f"\n  batch_size={bs}", flush=True)
+            try:
+                result = measure_one(
+                    llm, prompts, sp_list, args.warmup, args.iters, args.prompt_len
+                )
+                lat = result["latency"]["mean_ms"]
+                tps = result["throughput"]["mean_tps"]
+                print(f"    disabled: latency={lat:.1f}ms throughput={tps:.0f} tok/s")
+                results_map[(0, bs, 0)] = result
 
-            params = {
-                "model": args.model,
-                "mode": "disabled",
-                "max_steering_configs": 0,
-                "batch_size": bs,
-                "distinct_configs": 0,
-                "prompt_len": args.prompt_len,
-                "max_tokens": args.max_tokens,
-                "enable_steering": False,
-            }
-            write_result(
-                benchmark="vllm.table_sizing",
-                parameters=params,
-                results={
-                    "latency_ms": {
-                        k: v for k, v in result["latency"].items() if k != "samples_ms"
+                params = {
+                    "model": args.model,
+                    "mode": "disabled",
+                    "max_steering_configs": 0,
+                    "batch_size": bs,
+                    "distinct_configs": 0,
+                    "prompt_len": args.prompt_len,
+                    "max_tokens": args.max_tokens,
+                    "enable_steering": False,
+                }
+                write_result(
+                    benchmark="vllm.table_sizing",
+                    parameters=params,
+                    results={
+                        "latency_ms": {
+                            k: v
+                            for k, v in result["latency"].items()
+                            if k != "samples_ms"
+                        },
+                        "throughput_tokens_per_sec": result["throughput"],
+                        "avg_output_tokens": result["avg_output_tokens"],
                     },
-                    "throughput_tokens_per_sec": result["throughput"],
-                    "avg_output_tokens": result["avg_output_tokens"],
-                },
-                output_dir=args.output_dir,
-                tag=args.tag,
-                raw_samples_ms=result["latency"].get("samples_ms"),
-            )
-        except torch.cuda.OutOfMemoryError:
-            print(f"    OOM!")
-            results_map[(0, bs, 0)] = {"error": "OOM"}
+                    output_dir=args.output_dir,
+                    tag=args.tag,
+                    raw_samples_ms=result["latency"].get("samples_ms"),
+                )
+            except torch.cuda.OutOfMemoryError:
+                print(f"    OOM!")
+                results_map[(0, bs, 0)] = {"error": "OOM"}
 
-    del llm
-    gc.collect()
-    torch.cuda.empty_cache()
+        del llm
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    if args.skip_steering:
+        print("Skipping Phase 2 (steering sweep) per --skip-steering.")
+        # Fall through to the summary — it will note missing cells.
+        max_configs_sweep = []
 
     # ── Phase 2: steering, one model load per max_steering_configs ──────────
     for max_cfg in max_configs_sweep:
@@ -197,7 +233,7 @@ def main():
             model=args.model,
             enable_steering=True,
             max_steering_configs=max_cfg,
-            gpu_memory_utilization=0.9,
+            gpu_memory_utilization=args.gpu_memory_utilization,
             max_model_len=2048,
         )
 

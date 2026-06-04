@@ -13,6 +13,7 @@ venv/
 
 # Results
 results/
+profiles/
 
 # IDE
 .idea/
@@ -27,3 +28,5 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+.claude
