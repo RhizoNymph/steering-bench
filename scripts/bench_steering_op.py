@@ -33,8 +33,11 @@ if _has_custom_op:
         hidden_states: torch.Tensor,
         steering_table: torch.Tensor,
         steering_index: torch.Tensor,
+        any_active: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.ops.vllm.apply_steering(hidden_states, steering_table, steering_index)
+        return torch.ops.vllm.apply_steering(
+            hidden_states, steering_table, steering_index, any_active
+        )
 
     IMPL = "custom_op"
 else:
@@ -43,7 +46,10 @@ else:
         hidden_states: torch.Tensor,
         steering_table: torch.Tensor,
         steering_index: torch.Tensor,
+        any_active: torch.Tensor,
     ) -> torch.Tensor:
+        if not bool(any_active.item()):
+            return hidden_states.clone()
         return hidden_states + steering_table[steering_index[: hidden_states.shape[0]]].to(
             hidden_states.dtype
         )
@@ -78,8 +84,12 @@ def run_single(
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     steering_table = torch.randn(num_table_rows, hidden_size, dtype=torch.float32, device=device)
     steering_index = torch.randint(0, num_table_rows, (num_tokens,), dtype=torch.long, device=device)
+    any_active = torch.tensor(True, dtype=torch.bool, device=device)
 
-    stats = cuda_timer(warmup, iters, apply_steering, hidden_states, steering_table, steering_index)
+    stats = cuda_timer(
+        warmup, iters, apply_steering,
+        hidden_states, steering_table, steering_index, any_active,
+    )
     return stats.to_dict()
 
 

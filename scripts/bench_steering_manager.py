@@ -146,14 +146,17 @@ def main():
                 label = f"[{idx}/{total}] layers={num_layers} configs={num_configs} {hp_label}"
                 print(f"  {label} ...", end=" ", flush=True)
 
-                # Create manager and mock layers
+                # Each config consumes one row per phase (prefill + decode
+                # are independent rows under the strict-capacity contract),
+                # so the manager needs 2× num_configs rows.
+                max_configs = max(num_configs * 2, 4)
                 manager = SteeringManager(
-                    max_steering_configs=max(num_configs, 4),
+                    max_steering_configs=max_configs,
                     device=torch.device(args.device),
                 )
                 layers = create_mock_layers(
                     num_layers, hidden_size, max_steering_tokens,
-                    max(num_configs, 4), args.device,
+                    max_configs, args.device,
                 )
 
                 # Generate vectors
@@ -168,11 +171,14 @@ def main():
                     )
                     vectors_list.append(vecs)
 
-                # Register configs for populate/get_row benchmarks
+                # Register configs for BOTH phases so get_row_for_config can
+                # look up either is_prefill=True or False without hitting
+                # the "not registered" guard.
                 config_hashes = []
                 for i, vecs in enumerate(vectors_list):
                     h = 100 + i
                     manager.register_config(h, vecs, phase="prefill")
+                    manager.register_config(h, vecs, phase="decode")
                     config_hashes.append(h)
 
                 # Benchmark populate
@@ -184,6 +190,7 @@ def main():
                 # Cleanup configs for register/release benchmark
                 for h in config_hashes:
                     manager.release_config(h, phase="prefill")
+                    manager.release_config(h, phase="decode")
 
                 # Benchmark register/release cycle
                 cycle_stats, _ = bench_register_release(

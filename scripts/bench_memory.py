@@ -20,6 +20,8 @@ from steering_bench.output import write_result
 
 MODEL_CONFIGS = {
     "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
+    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
+    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
     "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
     "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
 }
@@ -119,10 +121,16 @@ def measure_model_memory(
 
     mem_before = _gpu_used_mb()
 
+    # max_model_len is kept tiny: this bench only measures buffer cost at
+    # model-load time (no generation). Forcing num_gpu_blocks_override
+    # below what `_check_enough_kv_cache_memory` needs for max_model_len
+    # makes vLLM bail at engine init with "estimated maximum model length
+    # is N". 256 fits comfortably inside the forced 64-block KV budget
+    # while still being a plausible value the profiler accepts.
     kwargs = {
         "model": model,
         "gpu_memory_utilization": gpu_memory_utilization,
-        "max_model_len": 2048,
+        "max_model_len": 256,
         "num_gpu_blocks_override": num_gpu_blocks_override,
     }
     if enable_steering:

@@ -35,6 +35,8 @@ from steering_bench.vectors import random_steering_vectors
 
 MODEL_CONFIGS = {
     "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
+    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
+    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
 }
 
 
@@ -56,6 +58,8 @@ def run_mixed(
     num_layers: int,
     distinct_vectors: bool = False,
     max_steering_configs: int = 4,
+    gpu_memory_utilization: float = 0.9,
+    max_num_seqs: int | None = None,
 ) -> dict:
     """Run a mixed batch: num_active of batch_size requests are steered.
 
@@ -73,13 +77,16 @@ def run_mixed(
         f"distinct={distinct_vectors})...",
         flush=True,
     )
-    llm = LLM(
+    llm_kwargs: dict = dict(
         model=model,
         enable_steering=True,
         max_steering_configs=max_steering_configs,
-        gpu_memory_utilization=0.9,
+        gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=2048,
     )
+    if max_num_seqs is not None:
+        llm_kwargs["max_num_seqs"] = max_num_seqs
+    llm = LLM(**llm_kwargs)
 
     prompts = make_prompts(batch_size, prompt_len)
 
@@ -197,14 +204,54 @@ def main():
             "scheduler doesn't serialize on table capacity."
         ),
     )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help=(
+            "Passed through to LLM(). The script does N model loads in one "
+            "Python process (one per --num-active value), and the in-process "
+            "CUDA allocator does not reliably return GPU memory to the OS "
+            "between loads. Lower this (e.g. 0.7) if you OOM partway through."
+        ),
+    )
+    parser.add_argument(
+        "--num-active-only",
+        type=int,
+        default=None,
+        help=(
+            "Run only one num_active cell instead of the full sweep. Use "
+            "this to put exactly one model load per Python process when the "
+            "in-process CUDA allocator leak is bad enough that even lower "
+            "--gpu-memory-utilization isn't enough."
+        ),
+    )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=None,
+        help=(
+            "Passed through to LLM(). vLLM's default max_num_seqs is 256, "
+            "which caps concurrent requests even when --batch-size is larger. "
+            "Set this to at least --batch-size when running BS > 256. "
+            "Leave unset to use vLLM's default."
+        ),
+    )
     args = parser.parse_args()
 
     model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
 
     bs = args.batch_size
-    active_counts = [0, 1, max(1, bs // 4), max(1, bs // 2), bs]
-    # Deduplicate (e.g. batch_size=4 collapses)
-    active_counts = sorted(set(active_counts))
+    if args.num_active_only is not None:
+        if args.num_active_only > bs:
+            parser.error(
+                f"--num-active-only={args.num_active_only} > --batch-size={bs}"
+            )
+        active_counts = [args.num_active_only]
+    else:
+        active_counts = [0, 1, max(1, bs // 4), max(1, bs // 2), bs]
+        # Deduplicate (e.g. batch_size=4 collapses)
+        active_counts = sorted(set(active_counts))
     labels = {0: "none_active", bs: "all_active"}
 
     # In distinct-vector mode each active slot needs its own table row.
@@ -249,6 +296,8 @@ def main():
                 num_layers=model_config["num_layers"],
                 distinct_vectors=args.distinct_vectors,
                 max_steering_configs=max_steering_configs,
+                gpu_memory_utilization=args.gpu_memory_utilization,
+                max_num_seqs=args.max_num_seqs,
             )
             mean_ms = result["latency"]["mean_ms"]
             p90_ms = result["latency"]["p90_ms"]

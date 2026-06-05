@@ -29,6 +29,8 @@ from steering_bench.vectors import random_steering_vectors
 
 MODEL_CONFIGS = {
     "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
+    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
+    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
     "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
 }
 
@@ -111,8 +113,8 @@ def main():
     parser = argparse.ArgumentParser(description="Throughput matrix: mode x batch_size")
     parser.add_argument("--model", default="google/gemma-3-4b-it")
     parser.add_argument("--output-dir", default="results/vllm/")
-    parser.add_argument("--warmup", type=int, default=3)
-    parser.add_argument("--iters", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--prompt-len", type=int, default=64)
     parser.add_argument(
@@ -127,6 +129,15 @@ def main():
     )
     parser.add_argument("--max-steering-configs", type=int, default=4)
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graph capture; used to ablate graph speedup.",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization", type=float, default=0.9,
+    )
+    parser.add_argument("--max-model-len", type=int, default=2048)
     args = parser.parse_args()
 
     batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
@@ -163,8 +174,9 @@ def main():
     llm = LLM(
         model=args.model,
         enable_steering=False,
-        gpu_memory_utilization=0.9,
-        max_model_len=2048,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
+        enforce_eager=args.enforce_eager,
     )
 
     for bs in batch_sizes:
@@ -187,6 +199,7 @@ def main():
                 "prompt_len": args.prompt_len,
                 "max_tokens": args.max_tokens,
                 "enable_steering": False,
+                "enforce_eager": args.enforce_eager,
             }
             write_result(
                 benchmark="vllm.throughput_matrix",
@@ -220,8 +233,9 @@ def main():
         model=args.model,
         enable_steering=True,
         max_steering_configs=args.max_steering_configs,
-        gpu_memory_utilization=0.9,
-        max_model_len=2048,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
+        enforce_eager=args.enforce_eager,
     )
 
     for bs in batch_sizes:
@@ -267,6 +281,7 @@ def main():
                     "max_tokens": args.max_tokens,
                     "enable_steering": True,
                     "max_steering_configs": args.max_steering_configs,
+                    "enforce_eager": args.enforce_eager,
                 }
                 write_result(
                     benchmark="vllm.throughput_matrix",

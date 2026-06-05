@@ -29,4 +29,9 @@ Thumbs.db
 .env
 .env.*
 
-.claude
+*.sqlite
+*.nsys-rep
+*.json.gz
+*.txt
+
+.claude/
