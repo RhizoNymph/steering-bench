@@ -77,3 +77,8 @@ All results share a common JSON schema with environment metadata, parameters, an
 - entry_points: [scripts/bench_capture_e2e.py, scripts/bench_capture_manager.py, scripts/bench_capture_filesystem.py]
 - depends_on: [core]
 - doc: docs/features/capture_consumers.md
+
+## Performance / Investigation Docs
+
+- `docs/performance.md` — consolidated steady-state perf characteristics and prior optimization passes
+- `docs/optimization_priorities.md` — addressable steering-subsystem costs surfaced by the 3090 nsys trace, ranked by TTFT impact

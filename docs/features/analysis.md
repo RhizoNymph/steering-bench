@@ -28,6 +28,9 @@ scripts/analyze.py
       → plot_library_comparison(): Tier 1 + Tier 2 horizontal bars
       → plot_ablation_heatmaps(): CUDA graphs 2x2 + hook points bars
       → plot_scaling_curves(): config count line plot with error bands
+      → plot_vllm_serving(): per (gpu, model, workload-sig, host) 4-panel
+                             bars (TTFT mean/p99, TPOT mean, output tok/s)
+                             aggregated across trial-suffixed tags
   → print_text_summary(): headline numbers to stdout
   → Export CSV
 ```

@@ -452,6 +452,19 @@ def plot_max_tokens_sweep(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
     else:
         data["per_step_ms"] = data["result_latency_ms_mean_ms"] / data["param_max_tokens"]
 
+    # Collapse repeated runs of the same (tag, num_active, max_tokens) cell
+    # to a single mean — otherwise the idle baseline has duplicate index
+    # labels and reindex() fails, and the per-active line zigzags between
+    # the duplicates.
+    data = (
+        data.groupby(
+            ["tag", "param_num_active", "param_max_tokens"],
+            as_index=False,
+            dropna=False,
+        )["per_step_ms"]
+        .mean()
+    )
+
     all_tags = sorted(data["tag"].fillna("").unique(), key=lambda t: (t != "", t))
     tag_groups = [
         (tag, data[data["tag"].fillna("") == tag])
@@ -1378,6 +1391,359 @@ def plot_steering_modes_matrix(
         )
 
 
+# ── vLLM serving (TTFT / TPOT / throughput by mode) ──────────────────────────
+
+
+_SERVING_MODE_ORDER = [
+    "disabled",
+    "enabled_idle",
+    "named_shared",
+    "inline_shared",
+    "all_steered_shared",
+    "per_request_n4",
+    "per_request_n16",
+    "per_request_4",
+    "per_request_16",
+    "inline_unique",
+]
+
+
+def _short_gpu(name: str) -> str:
+    """Map verbose GPU strings to short slugs for filenames."""
+    if not name:
+        return "unknown-gpu"
+    n = name.lower()
+    if "h100" in n and "nvl" in n:
+        return "h100-nvl"
+    if "h100" in n:
+        return "h100"
+    if "a100" in n:
+        return "a100"
+    if "3090" in n:
+        return "3090"
+    if "4090" in n:
+        return "4090"
+    if "l40" in n:
+        return "l40"
+    # Fallback: tokenize and pick the model marker.
+    safe = name.replace("/", "_").replace(" ", "-").lower()
+    return safe[:24]
+
+
+def _short_model(name: str) -> str:
+    if not name:
+        return "unknown-model"
+    base = name.split("/")[-1].lower()
+    return base.replace("_", "-")
+
+
+def _short_host(name: str) -> str:
+    """Extract a short box identifier from a hostname like
+    ``0203-dsm3-dla100sxm-prxmx260002`` → ``box260002``.
+    Falls back to the full hostname (sanitised) if no match.
+    """
+    if not name:
+        return ""
+    import re
+    m = re.search(r"prxmx?(\d+)", name)
+    if m:
+        return f"box{m.group(1)}"
+    m = re.search(r"(\d{5,})", name)
+    if m:
+        return f"box{m.group(1)}"
+    return name.replace("/", "_").replace(" ", "-")[:24]
+
+
+def _sort_serving_modes(modes: list[str]) -> list[str]:
+    known = [m for m in _SERVING_MODE_ORDER if m in modes]
+    extra = sorted(m for m in modes if m not in _SERVING_MODE_ORDER)
+    return known + extra
+
+
+# Panel layout: column → (result column, ylabel, panel title, lower-is-better).
+_SERVING_PANELS = [
+    ("result_ttft_ms_mean_ms", "TTFT mean (ms)", "TTFT (mean)", True),
+    ("result_ttft_ms_p99_ms", "TTFT p99 (ms)", "TTFT (p99)", True),
+    ("result_tpot_ms_mean_ms", "TPOT mean (ms)", "TPOT (mean)", True),
+    ("result_offline_output_tps", "Output tok/s", "Output throughput", False),
+]
+
+
+def plot_vllm_serving(df: pd.DataFrame, output_dir: Path, fmt: str) -> None:
+    """Plot vllm.serving results as grouped bars per mode.
+
+    Records are grouped by ``(gpu, model, workload, prompt_len,
+    max_tokens, concurrency, hostname)`` — one figure per group, since
+    those keys define a comparable workload. Within a group, trials
+    sharing a mode are aggregated by mean ± stddev of the trial means.
+
+    Four panels per figure:
+      TTFT mean, TTFT p99, TPOT mean, output throughput.
+
+    The bar count above each bar shows ``n`` (number of trials).
+    """
+    data = df[df["benchmark"] == "vllm.serving"].copy()
+    if data.empty:
+        return
+
+    # Drop rows missing the metrics we plot — keeps error-only records out.
+    metric_cols = [m for m, *_ in _SERVING_PANELS]
+    have_any = data[metric_cols].notna().any(axis=1)
+    data = data[have_any]
+    if data.empty:
+        return
+
+    group_cols = [
+        "env_gpu",
+        "param_model",
+        "param_workload",
+        "param_prompt_len",
+        "param_max_tokens",
+        "param_concurrency",
+        "env_hostname",
+    ]
+    for col in group_cols:
+        if col not in data.columns:
+            data[col] = ""
+    # NaN-stable grouping: replace NaN/None with sentinel so groupby keeps them.
+    data[group_cols] = data[group_cols].fillna("-")
+
+    grouped = data.groupby(group_cols, dropna=False)
+
+    for keys, gdata in grouped:
+        gpu, model, workload, plen, mtok, conc, host = keys
+        if gdata.empty:
+            continue
+
+        modes = _sort_serving_modes(gdata["param_mode"].dropna().unique().tolist())
+        if not modes:
+            continue
+
+        # Aggregate trial means per mode.
+        agg: dict[str, dict[str, tuple[float, float, int]]] = {m: {} for m in modes}
+        for mode in modes:
+            mrows = gdata[gdata["param_mode"] == mode]
+            for metric, *_ in _SERVING_PANELS:
+                if metric not in mrows.columns:
+                    continue
+                vals = pd.to_numeric(mrows[metric], errors="coerce").dropna()
+                if vals.empty:
+                    continue
+                n = int(len(vals))
+                mean = float(vals.mean())
+                std = float(vals.std(ddof=0)) if n > 1 else 0.0
+                agg[mode][metric] = (mean, std, n)
+
+        # Skip groups with no plottable data.
+        if not any(agg[m] for m in modes):
+            continue
+
+        n_panels = len(_SERVING_PANELS)
+        fig, axes = plt.subplots(
+            1, n_panels, figsize=(4.2 * n_panels, 4.5), squeeze=False
+        )
+        axes = axes[0]
+
+        x = np.arange(len(modes))
+        bar_color = [COLORS.get(m, "#666666") for m in modes]
+
+        for ax, (metric, ylabel, title, lower_better) in zip(axes, _SERVING_PANELS):
+            means = [agg[m].get(metric, (np.nan, 0, 0))[0] for m in modes]
+            stds = [agg[m].get(metric, (np.nan, 0, 0))[1] for m in modes]
+            ns = [agg[m].get(metric, (np.nan, 0, 0))[2] for m in modes]
+
+            bars = ax.bar(x, means, yerr=stds, color=bar_color, capsize=3)
+            ax.set_xticks(x)
+            ax.set_xticklabels(modes, rotation=30, ha="right", fontsize=9)
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.grid(True, axis="y", alpha=0.3)
+
+            # Annotate n above each bar (or top of error bar if present).
+            ymax = max(
+                (m + s for m, s in zip(means, stds) if not (np.isnan(m))),
+                default=1.0,
+            )
+            pad = ymax * 0.02
+            for xi, (m, s, n) in enumerate(zip(means, stds, ns)):
+                if np.isnan(m) or n == 0:
+                    continue
+                ax.text(
+                    xi, m + s + pad, f"n={n}",
+                    ha="center", va="bottom", fontsize=8, color="#444",
+                )
+            if not np.isnan(ymax):
+                ax.set_ylim(0, ymax * 1.18)
+
+        # Title with full identification of the workload cell.
+        plen_s = "" if plen in ("-", None) else f"plen={plen}"
+        wl_bits = [workload, plen_s, f"mt={mtok}", f"c={conc}"]
+        wl_str = "  ".join(b for b in wl_bits if b)
+        host_short = _short_host(str(host)) if host and host != "-" else ""
+        host_str = f"  ({host_short})" if host_short else ""
+        fig.suptitle(
+            f"vLLM serving — {gpu} · {model}\n{wl_str}{host_str}",
+            fontsize=11,
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.92])
+
+        gpu_s = _short_gpu(str(gpu))
+        model_s = _short_model(str(model))
+        # Workload signature, compact for filenames.
+        def _clean(v) -> str:
+            s = str(v).replace("/", "-").replace(" ", "-")
+            return s if s != "-" else "na"
+        wl_sig = f"{_clean(workload)}-pl{_clean(plen)}-mt{_clean(mtok)}-c{_clean(conc)}"
+        host_suffix = f"_{host_short}" if host_short else ""
+        name = f"serving_{gpu_s}_{model_s}_{wl_sig}{host_suffix}.{fmt}"
+        _save(fig, output_dir / name, name)
+
+
+_SWEEP_PANELS = [
+    ("result_tpot_ms_mean_ms", "TPOT mean (ms)", "TPOT vs max_tokens"),
+    ("result_ttft_ms_mean_ms", "TTFT mean (ms)", "TTFT vs max_tokens"),
+    ("result_offline_output_tps", "Output tok/s", "Throughput vs max_tokens"),
+]
+
+
+def plot_serving_max_tokens_sweep(
+    df: pd.DataFrame, output_dir: Path, fmt: str
+) -> None:
+    """Sweep across ``param_max_tokens`` for ``vllm.serving`` records.
+
+    Collapses the per-max_tokens figures emitted by ``plot_vllm_serving``
+    into a single line chart per (gpu, model, workload, prompt_len,
+    concurrency, host) cell — one line per mode, x-axis = max_tokens.
+
+    Only fires when a cell has ≥2 distinct max_tokens values; otherwise
+    the per-mt bar chart is enough.
+    """
+    data = df[df["benchmark"] == "vllm.serving"].copy()
+    if data.empty:
+        return
+
+    metric_cols = [m for m, *_ in _SWEEP_PANELS]
+    have_any = data[metric_cols].notna().any(axis=1)
+    data = data[have_any]
+    if data.empty:
+        return
+
+    group_cols = [
+        "env_gpu",
+        "param_model",
+        "param_workload",
+        "param_prompt_len",
+        "param_concurrency",
+        "env_hostname",
+    ]
+    for col in group_cols:
+        if col not in data.columns:
+            data[col] = ""
+    data[group_cols] = data[group_cols].fillna("-")
+
+    for keys, gdata in data.groupby(group_cols, dropna=False):
+        gpu, model, workload, plen, conc, host = keys
+        mtoks = sorted(
+            v
+            for v in pd.to_numeric(
+                gdata["param_max_tokens"], errors="coerce"
+            ).dropna().unique()
+        )
+        if len(mtoks) < 2:
+            continue
+
+        modes = _sort_serving_modes(gdata["param_mode"].dropna().unique().tolist())
+        if not modes:
+            continue
+
+        # Aggregate trial means per (mode, mt) per metric.
+        agg: dict[tuple[str, float], dict[str, tuple[float, float, int]]] = {}
+        for mode in modes:
+            for mt in mtoks:
+                rows = gdata[
+                    (gdata["param_mode"] == mode)
+                    & (pd.to_numeric(gdata["param_max_tokens"], errors="coerce") == mt)
+                ]
+                bucket: dict[str, tuple[float, float, int]] = {}
+                for metric, *_ in _SWEEP_PANELS:
+                    if metric not in rows.columns:
+                        continue
+                    vals = pd.to_numeric(rows[metric], errors="coerce").dropna()
+                    if vals.empty:
+                        continue
+                    n = int(len(vals))
+                    bucket[metric] = (
+                        float(vals.mean()),
+                        float(vals.std(ddof=0)) if n > 1 else 0.0,
+                        n,
+                    )
+                if bucket:
+                    agg[(mode, mt)] = bucket
+
+        if not agg:
+            continue
+
+        n_panels = len(_SWEEP_PANELS)
+        fig, axes = plt.subplots(
+            1, n_panels, figsize=(4.6 * n_panels, 4.5), squeeze=False
+        )
+        axes = axes[0]
+
+        for ax, (metric, ylabel, title) in zip(axes, _SWEEP_PANELS):
+            for mode in modes:
+                xs, ys, errs = [], [], []
+                for mt in mtoks:
+                    cell = agg.get((mode, mt), {})
+                    if metric not in cell:
+                        continue
+                    mean, std, _n = cell[metric]
+                    xs.append(mt)
+                    ys.append(mean)
+                    errs.append(std)
+                if not xs:
+                    continue
+                ax.errorbar(
+                    xs, ys, yerr=errs,
+                    marker="o", linewidth=1.8, markersize=6, capsize=3,
+                    color=COLORS.get(mode, "#666666"),
+                    label=mode,
+                )
+            ax.set_xscale("log", base=2)
+            ax.set_xlabel("max_tokens")
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+            ax.set_xticks(mtoks)
+            ax.set_xticklabels([str(int(m)) for m in mtoks], fontsize=9)
+
+        handles, labels = axes[0].get_legend_handles_labels()
+        if handles:
+            axes[0].legend(handles, labels, loc="best", fontsize=9, frameon=True)
+
+        plen_s = "" if plen in ("-", None) else f"plen={plen}"
+        wl_bits = [workload, plen_s, f"c={conc}"]
+        wl_str = "  ".join(b for b in wl_bits if b)
+        host_short = _short_host(str(host)) if host and host != "-" else ""
+        host_str = f"  ({host_short})" if host_short else ""
+        fig.suptitle(
+            f"vLLM serving — max_tokens sweep — {gpu} · {model}\n{wl_str}{host_str}",
+            fontsize=11,
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.90])
+
+        gpu_s = _short_gpu(str(gpu))
+        model_s = _short_model(str(model))
+
+        def _clean(v) -> str:
+            s = str(v).replace("/", "-").replace(" ", "-")
+            return s if s != "-" else "na"
+
+        wl_sig = f"{_clean(workload)}-pl{_clean(plen)}-c{_clean(conc)}"
+        host_suffix = f"_{host_short}" if host_short else ""
+        name = f"serving_max_tokens_sweep_{gpu_s}_{model_s}_{wl_sig}{host_suffix}.{fmt}"
+        _save(fig, output_dir / name, name)
+
+
 def print_steering_modes_matrix_summary(df: pd.DataFrame) -> None:
     """Text comparison table for the modes-matrix bench.
 
@@ -1735,6 +2101,10 @@ def main():
 
     # Modes matrix
     plot_steering_modes_matrix(df, output_dir, args.format)
+
+    # vLLM serving (per gpu × model × workload-signature)
+    plot_vllm_serving(df, output_dir, args.format)
+    plot_serving_max_tokens_sweep(df, output_dir, args.format)
 
     # Text summary
     print_text_summary(df)

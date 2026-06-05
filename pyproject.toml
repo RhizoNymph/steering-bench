@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "steering-bench"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     # torch pinned to match the version vLLM was compiled against.
     # Loose specs cause uv run to auto-upgrade and break NCCL ABI.
-    "torch==2.10.0",
+    "torch==2.11.0",
     "numpy>=1.26",
     "pandas>=2.1",
     "matplotlib>=3.8",
@@ -22,7 +22,7 @@ transformerlens = ["transformer-lens>=2.0"]
 nnsight = ["nnsight>=0.3"]
 # repeng pins numpy<2 which conflicts with vllm (numpy>=2).
 # Install repeng in a SEPARATE environment: `uv pip install repeng`
-repeng = ["repeng>=0.3"]
+#repeng = ["repeng>=0.3"]
 pyvene = ["pyvene>=0.1"]
 # Excludes repeng due to numpy version conflict with vllm.
 all-external = [
@@ -36,7 +36,7 @@ dev = ["pytest>=8.0", "ruff>=0.3", "mypy>=1.8"]
 [tool.uv.sources]
 # Points to the capture-consumers vLLM fork (feat/capture-consumers branch).
 # Steering benchmarks continue to work — the fork includes all upstream changes.
-vllm = { path = "/home/nymph/Code/vllm/capture-consumers", editable = true }
+vllm = { path = "/home/nymph/Code/vllm/steering", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]

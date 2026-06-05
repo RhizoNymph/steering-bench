@@ -17,6 +17,17 @@ Modes:
 Workloads:
     synthetic (default)  fixed-length prompts generated locally
     sharegpt             via --sharegpt-path pointing at a local ShareGPT_V3 json
+
+Each mode runs a discarded warmup pass (defaults to --concurrency requests
+at --warmup-max-tokens=8) before measurement so Triton JIT compile, the
+first-touch auto-promote LRU, and the H2D staging path do not dominate the
+first wave of measured requests. After warmup, the bench sleeps
+--warmup-drain-seconds (default 0.5 s) and fires one 1-token soft-barrier
+request so async background work (broadcasts, deferred H2D) queued during
+warmup lands before measurement begins — without that drain, PR worktrees
+with async-dispatch behavior showed a phantom +2 ms per-token TPOT
+regression on the measured pass. Disable warmup with --warmup-requests 0;
+disable just the drain with --warmup-drain-seconds 0.
 """
 
 from __future__ import annotations
@@ -294,7 +305,55 @@ async def run_mode(
     parameters: dict,
     output_dir: str,
     tag: str,
+    warmup_requests: int = 0,
+    warmup_max_tokens: int = 8,
+    warmup_drain_seconds: float = 0.5,
 ) -> dict:
+    # Triton kernels JIT-compile on first invocation with a given
+    # specialization, and the auto-promote / inline paths allocate on
+    # first-touch. Without a warmup pass the first wave of concurrent
+    # requests in the first steered mode pays those costs and inflates
+    # TTFT medians by hundreds of ms.
+    if warmup_requests > 0:
+        n = min(warmup_requests, len(prompts))
+        print(f"  {mode}: warmup ({n} reqs, max_tokens={warmup_max_tokens})")
+        warm_t0 = time.perf_counter()
+        warm = await run_workload(
+            base_url,
+            model,
+            prompts[:n],
+            warmup_max_tokens,
+            extra_bodies[:n],
+            concurrency,
+        )
+        warm_errs = sum(1 for r in warm if r.error is not None)
+        print(
+            f"    warmup done in {time.perf_counter() - warm_t0:.1f}s "
+            f"({n - warm_errs} ok / {warm_errs} err)"
+        )
+        # Drain async background work (auto-promote broadcasts,
+        # non-blocking H2D, deferred bookkeeping) before measurement.
+        # Without this, fire-and-forget tasks queued during warmup
+        # land during the measured pass and inflate TPOT — observed
+        # as a phantom +2 ms per-token regression on PR worktrees vs
+        # base that disappeared once warmup_requests=0.
+        # The sleep gives the bookkeeping wall time to land; the
+        # single-request soft barrier then ensures any work the
+        # sleep didn't catch either completes within it or queues
+        # behind it before measurement begins.
+        if warmup_drain_seconds > 0:
+            print(
+                f"    draining async work ({warmup_drain_seconds}s sleep "
+                f"+ 1-token barrier)"
+            )
+            await asyncio.sleep(warmup_drain_seconds)
+            await run_workload(
+                base_url, model, prompts[:1], 1, extra_bodies[:1], 1
+            )
+        # Discard timing accumulators so the measured run's per-mode
+        # steering-timing dump reflects only the measured requests.
+        await dump_and_reset_steering_timings(base_url, mode, quiet=True)
+
     results = await run_workload(
         base_url, model, prompts, max_tokens, extra_bodies, concurrency
     )
@@ -308,10 +367,68 @@ async def run_mode(
         output_dir=output_dir,
         tag=tag,
     )
+    # No-op unless the server was launched with both
+    # VLLM_STEERING_TIMING=1 and VLLM_SERVER_DEV_MODE=1.
+    await dump_and_reset_steering_timings(base_url, mode)
     return s
 
 
 NAMED_BENCH_MODULE = "bench_named_shared"
+
+
+def pack_steering_vectors(vecs: dict, with_scales: bool = False) -> dict:
+    """Convert a dict[hook, dict[layer, list[float]]] to the binary wire
+    form used by vllm.config.steering_types.SteeringHookPacked.
+
+    The HTTP steering fields (``steering_vectors`` / ``prefill_*`` /
+    ``decode_*``) accept only this packed shape — the legacy
+    list-of-floats JSON form is rejected at pydantic validation
+    server-side, so every inline-vector request must be packed.
+
+    When *with_scales* is True, attach a deterministic per-layer ``scales``
+    list (varies row to row, all != 1.0) so the server exercises the
+    per-row multiply path in ``unpack_steering_vectors``.
+    """
+    import base64
+    import numpy as np
+
+    out: dict[str, dict] = {}
+    for hook, layer_dict in vecs.items():
+        layer_indices = sorted(layer_dict.keys())
+        arr = np.stack(
+            [np.asarray(layer_dict[i], dtype=np.float32) for i in layer_indices]
+        )
+        entry: dict = {
+            "dtype": "float32",
+            "shape": list(arr.shape),
+            "layer_indices": layer_indices,
+            "data": base64.b64encode(arr.tobytes()).decode("ascii"),
+        }
+        if with_scales:
+            # Deterministic per-row scales that vary across rows and are
+            # all != 1.0 so every row hits the per-row multiply path.
+            entry["scales"] = [
+                round(0.5 + 0.05 * i, 4) for i in range(len(layer_indices))
+            ]
+        out[hook] = entry
+    return out
+
+
+def distinct_configs_for_mode(mode: str, diverse_vectors: list) -> int:
+    """Return how many distinct steering configs the mode exercises.
+
+    Used as a floor on the warmup request count so that every config the
+    measured pass will see has been first-touched (Triton JIT, auto-promote
+    LRU, pinned-buffer alloc) before measurement begins. Without this,
+    per_request_n16 with 8 warmup reqs leaves 8 configs cold and pollutes
+    the measured tail.
+    """
+    if mode in ("disabled", "enabled_idle"):
+        return 0
+    if mode in ("named_shared", "all_steered_shared"):
+        return 1
+    # per_request_nK rotates through the full diverse list.
+    return len(diverse_vectors)
 
 
 def build_extra_bodies(
@@ -319,19 +436,87 @@ def build_extra_bodies(
     mode: str,
     shared_vectors,
     diverse_vectors: list,
+    packed_with_scales: bool = False,
 ) -> list[dict | None]:
     if mode in ("disabled", "enabled_idle"):
         return [None] * num_prompts
+    pack = lambda v: pack_steering_vectors(v, with_scales=packed_with_scales)
     if mode == "all_steered_shared":
-        return [{"steering_vectors": shared_vectors}] * num_prompts
+        packed_shared = pack(shared_vectors)
+        return [{"steering_vectors": packed_shared}] * num_prompts
     if mode == "named_shared":
         # Server-side named module pre-registered via
         # /v1/steering/modules/register; only the name (16 bytes-ish) rides
         # the wire per request.
         return [{"steering_name": NAMED_BENCH_MODULE}] * num_prompts
-    # per_request_nK
+    # per_request_nK — pre-pack each distinct config once so the
+    # repeated cycling doesn't re-encode bytes.
     k = len(diverse_vectors)
-    return [{"steering_vectors": diverse_vectors[i % k]} for i in range(num_prompts)]
+    packed_diverse = [pack(v) for v in diverse_vectors]
+    return [
+        {"steering_vectors": packed_diverse[i % k]} for i in range(num_prompts)
+    ]
+
+
+async def dump_and_reset_steering_timings(
+    base_url: str,
+    mode: str,
+    timeout: float = 30.0,
+    quiet: bool = False,
+) -> None:
+    """Pull host-side steering timing breakdown from each worker.
+
+    Only fires when ``VLLM_STEERING_TIMING=1`` is set in the *server*
+    environment.  Hits ``/v1/steering/_timings/dump_and_reset`` (which
+    requires ``VLLM_SERVER_DEV_MODE=1``), prints one table per worker
+    annotated with the just-finished mode, then resets the accumulators
+    so the next mode gets a clean slate.  Pass ``quiet=True`` to reset
+    silently — used between warmup and measurement so warmup costs do
+    not appear in the per-mode timing table.
+    """
+    import httpx
+
+    url = base_url.rstrip("/").removesuffix("/v1")
+    endpoint = f"{url}/v1/steering/_timings/dump_and_reset"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(endpoint)
+    except Exception as e:
+        if not quiet:
+            print(f"[timing] dump endpoint unavailable ({e}) — skipping")
+        return
+    if r.status_code == 404:
+        # Server not in dev mode — endpoint not attached.
+        return
+    if r.status_code != 200:
+        if not quiet:
+            print(f"[timing] dump endpoint returned {r.status_code}: {r.text[:200]}")
+        return
+    if quiet:
+        return
+    workers = r.json().get("workers", [])
+    if not workers:
+        return
+    print(f"\n[timing mode={mode}] per-worker steering breakdown")
+    for i, worker in enumerate(workers):
+        if not worker:
+            continue
+        name_w = max(len(row[0]) for row in worker)
+        print(
+            f"  worker[{i}]  "
+            f"{'name':<{name_w}}  {'n':>8}  {'total_ms':>12}  "
+            f"{'mean_us':>10}  {'max_ms':>10}"
+        )
+        for entry in worker:
+            name, count, total_ns, max_ns = entry
+            total_ms = total_ns / 1e6
+            mean_us = total_ns / count / 1e3 if count else 0.0
+            max_ms = max_ns / 1e6
+            print(
+                f"  worker[{i}]  "
+                f"{name:<{name_w}}  {count:>8d}  {total_ms:>12.3f}  "
+                f"{mean_us:>10.2f}  {max_ms:>10.3f}"
+            )
 
 
 async def register_named_module(
@@ -382,10 +567,46 @@ def main() -> None:
     parser.add_argument("--max-steering-configs", type=int, default=16)
     parser.add_argument("--startup-timeout", type=float, default=240.0)
     parser.add_argument(
+        "--warmup-requests",
+        type=int,
+        default=None,
+        help="Discarded warmup requests fired per mode before measurement. "
+        "Defaults to --concurrency so every in-flight slot is primed. "
+        "Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--warmup-max-tokens",
+        type=int,
+        default=8,
+        help="max_tokens for each warmup request (default: 8).",
+    )
+    parser.add_argument(
+        "--packed-with-scales",
+        action="store_true",
+        help="Attach a deterministic per-layer scales list to each packed "
+        "hook so the server exercises the per-row multiply path in "
+        "unpack_steering_vectors. No-op for named_shared, enabled_idle, "
+        "and disabled modes.",
+    )
+    parser.add_argument(
+        "--warmup-drain-seconds",
+        type=float,
+        default=0.5,
+        help="Seconds to sleep after warmup before the soft-barrier "
+        "request. Lets async work (broadcasts, deferred H2D) queued "
+        "during warmup land before measurement. Set 0 to disable.",
+    )
+    parser.add_argument(
         "--sharegpt-path",
         default=None,
         help="Path to ShareGPT_V3_unfiltered_cleaned_split.json (optional). "
         "If unset, synthetic prompts are used.",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Pass --enforce-eager to the vLLM server (disables CUDA graph "
+        "capture). Used to ablate graph speedup vs steering.",
     )
     parser.add_argument(
         "--modes",
@@ -396,6 +617,12 @@ def main() -> None:
              "every request — the floor for the spec-reuse case.",
     )
     args = parser.parse_args()
+
+    warmup_requests = (
+        args.warmup_requests
+        if args.warmup_requests is not None
+        else args.concurrency
+    )
 
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     unknown = set(modes) - {
@@ -472,7 +699,14 @@ def main() -> None:
         "prompt_len": args.prompt_len if workload == "synthetic" else None,
         "max_model_len": args.max_model_len,
         "sharegpt_path": args.sharegpt_path,
+        "warmup_requests": warmup_requests,
+        "warmup_max_tokens": args.warmup_max_tokens,
+        "warmup_drain_seconds": args.warmup_drain_seconds,
+        "packed_with_scales": args.packed_with_scales,
+        "enforce_eager": args.enforce_eager,
     }
+
+    eager_args = ["--enforce-eager"] if args.enforce_eager else []
 
     # Phase 1: disabled (needs its own server)
     if "disabled" in modes:
@@ -485,13 +719,16 @@ def main() -> None:
                 str(args.max_model_len),
                 "--gpu-memory-utilization",
                 str(args.gpu_memory_utilization),
-            ],
+            ] + eager_args,
             log_path=log_dir / "vllm_serving_disabled.log",
         )
         try:
             asyncio.run(wait_for_server(base_url, args.startup_timeout))
             print("\n[phase 1/2] disabled")
             extra = build_extra_bodies(args.num_prompts, "disabled", shared, [])
+            mode_warmup = max(
+                warmup_requests, distinct_configs_for_mode("disabled", [])
+            )
             asyncio.run(
                 run_mode(
                     base_url,
@@ -504,6 +741,9 @@ def main() -> None:
                     {**parameters_base, "enable_steering": False},
                     args.output_dir,
                     args.tag,
+                    warmup_requests=mode_warmup,
+                    warmup_max_tokens=args.warmup_max_tokens,
+                    warmup_drain_seconds=args.warmup_drain_seconds,
                 )
             )
         finally:
@@ -531,7 +771,7 @@ def main() -> None:
                 str(args.max_model_len),
                 "--gpu-memory-utilization",
                 str(args.gpu_memory_utilization),
-            ],
+            ] + eager_args,
             log_path=log_dir / "vllm_serving_enabled.log",
             env=steered_env,
         )
@@ -543,11 +783,19 @@ def main() -> None:
                     register_named_module(base_url, NAMED_BENCH_MODULE, shared)
                 )
             for mode in steered_modes:
+                diverse_for_mode = (
+                    diverse_n4 if mode == "per_request_n4" else diverse_n16
+                )
                 extra = build_extra_bodies(
                     args.num_prompts,
                     mode,
                     shared,
-                    diverse_n4 if mode == "per_request_n4" else diverse_n16,
+                    diverse_for_mode,
+                    packed_with_scales=args.packed_with_scales,
+                )
+                mode_warmup = max(
+                    warmup_requests,
+                    distinct_configs_for_mode(mode, diverse_for_mode),
                 )
                 asyncio.run(
                     run_mode(
@@ -565,6 +813,9 @@ def main() -> None:
                         },
                         args.output_dir,
                         args.tag,
+                        warmup_requests=mode_warmup,
+                        warmup_max_tokens=args.warmup_max_tokens,
+                        warmup_drain_seconds=args.warmup_drain_seconds,
                     )
                 )
         finally:
