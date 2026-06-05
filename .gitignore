@@ -13,6 +13,7 @@ venv/
 
 # Results
 results/
+profiles/
 
 # IDE
 .idea/
