@@ -33,6 +33,17 @@ all-external = [
 all = ["steering-bench[vllm,all-external]"]
 dev = ["pytest>=8.0", "ruff>=0.3", "mypy>=1.8"]
 
+# Worker-side capture/steering consumers used by bench_dynamic_steering.py.
+# Worker consumers must be resolvable by name in each worker process, so they
+# are advertised through vLLM's entry-point group (instances can't be passed
+# for location="worker"). See src/steering_bench/capture_consumers/bench_consumers.py.
+[project.entry-points."vllm.capture_consumers"]
+bench_capture_async = "steering_bench.capture_consumers.bench_consumers:BenchCaptureAsync"
+bench_capture_sync = "steering_bench.capture_consumers.bench_consumers:BenchCaptureSync"
+bench_steer_async = "steering_bench.capture_consumers.bench_consumers:BenchSteerAsync"
+bench_steer_sync = "steering_bench.capture_consumers.bench_consumers:BenchSteerSync"
+bench_steer_dynamic = "steering_bench.capture_consumers.bench_consumers:BenchSteerDynamic"
+
 [tool.uv.sources]
 # Points to the capture-consumers vLLM fork (feat/capture-consumers branch).
 # Steering benchmarks continue to work — the fork includes all upstream changes.
