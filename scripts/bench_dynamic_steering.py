@@ -204,6 +204,7 @@ def main() -> None:
     parser.add_argument("--tag", default="")
     # Internal single-cell mode.
     parser.add_argument("--cell", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--arm", help=argparse.SUPPRESS)
     parser.add_argument("--batch-size", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
