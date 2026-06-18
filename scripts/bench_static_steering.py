@@ -60,7 +60,6 @@ def _stats(samples):
 def _run_cell(args) -> dict:
     import numpy as np
     import torch
-
     from vllm import LLM, SamplingParams
 
     steer = args.arm == "steer"
