@@ -46,7 +46,6 @@ def main() -> None:
 
     import numpy as np
     import torch
-
     from vllm import LLM, SamplingParams
 
     steer = args.arm == "steer"
