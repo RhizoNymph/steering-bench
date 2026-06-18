@@ -9,11 +9,19 @@ Bench: `scripts/bench_dynamic_steering.py` + `scripts/bench_static_steering.py`.
 - **True dynamic-steering overhead is <1% in steady state.** bs=1 shows
   +2.6–4.0% (fixed per-step consumer cost on a tiny ~2 s step), falling to
   +0.2–0.8% at bs=8 and bs=16. Capture-only stays ≤1% everywhere.
-- A **+8–11% spike appears only with cudagraphs at decode batch >16**
+- A **+7–11% spike appears only with cudagraphs at decode batch >16**
   (bs=24/32/40). It is **not** steering compute: under `enforce_eager` the
-  same bs=32 steering is **+0.5%**. It is a **cudagraph-path artifact**.
-- Attribution (feat/integration vs dynamic-steering) and nsys root cause:
-  **see the live sections below.**
+  same bs=32 steering is **+0.5%**, and nsys shows **GPU kernel time is
+  identical** to baseline — the cost is 100% host-side.
+- **Introduced by dynamic steering, not pre-existing.** feat/integration's
+  4-arg `apply_steering` is flat under cudagraphs (+0.4% at bs=32);
+  dynamic-steering's 8-arg op spikes to +6.7% (static) / +8.6% (tier).
+- **Root cause:** steering ops in the compiled layer forward downgrade the
+  decode off the FULL cudagraph → ~2× more eager kernel launches per step
+  (`cudaLaunchKernel` 6.7k→14.4k, `cudaGraphLaunch` 603→468). Host-launch
+  overhead, hidden in eager / at bs≤16, exposed by fast graph replay at
+  bs>16. **Fixable** (make the op cudagraph-fusable) → should reach the
+  eager <1%. See §6.
 - ⚠️ **Housekeeping:** both GPUs were clock-locked at 1700 MHz for clean
   measurement (`sudo nvidia-smi -lgc 1700`). Restore with
   `sudo nvidia-smi -rgc` on localhost and node0 when done.
@@ -212,12 +220,33 @@ enough GPU. Under cudagraphs the replay is fast, and at bs>16 the per-step
 host work stops being overlapped → exposed. (Eager pays per-op launch cost
 anyway and the long forward hides it → +0.5%.)
 
+### Primary driver (evidence-backed conclusion)
+
+The **FULL→eager/PIECEWISE cudagraph downgrade** is the main wall-clock cost,
+and it hits **both** static and dynamic: with steering on, `cudaGraphLaunch`
+*drops* (603→468) while `cudaLaunchKernel` ~doubles (6.7k→14.4k) — the
+decode that ran as one graph replay now launches ~60 steering ops/layer (and
+their neighbours) eagerly each step. GPU compute is unchanged, so this pure
+host-launch overhead is hidden in eager (long forward) and at bs≤16 (host
+races ahead of a slow-enough GPU) but exposed under cudagraphs at bs>16.
+
+`apply_layer_steering`/`maybe_capture_residual` are called inside the
+gemma4 decoder-layer `forward` (gemma4.py:732–773), which is inside the
+`@support_torch_compile` region, and the steering ops are **not** in
+`splitting_ops` — so this is a capture/replay downgrade, not a declared
+split. The dynamic arm's 254 ms `cudaStreamSynchronize` (×288) is likely
+**mostly background capture-dispatch-thread waits** (overlapped, not added
+wall-clock — capture-only-no-steer was +1%); the static arm (no consumer,
+median-3.7 µs syncs) shows the launch overhead alone is already +6.7%.
+
 ### Still open (morning)
 
-- Exact call site of the dynamic arm's 254 ms `cudaStreamSynchronize`
-  (re-profiling with `--cudabacktrace=sync` to get the stack — running).
-- Confirm the FULL-graph break: check `cudagraph` capture logs / inspect
-  whether `apply_steering` is in `splitting_ops` or treated as a break.
+- Confirm FULL→PIECEWISE downgrade directly: nsys-ui timeline of
+  `/tmp/nsys_dyn_bt.nsys-rep` (saved on node0) + the cudagraph dispatch
+  decision in `gpu_model_runner` (does the presence of the steering custom
+  op drop the step out of the FULL graph at bs>16?). `--cudabacktrace`/
+  `--python-backtrace` did **not** emit call-stack tables in this
+  nsys 2025.3 sqlite export — use nsys-ui or `--sample=process-tree` next.
 
 ### Fix directions
 
