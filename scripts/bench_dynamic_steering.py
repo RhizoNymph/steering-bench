@@ -105,6 +105,25 @@ def _make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
     return [" ".join(["hello"] * words_needed)] * num_prompts
 
 
+def _gpu_sample() -> dict[str, int]:
+    """Current SM clock (MHz) and temperature (C) — for thermal-drift
+    transparency. Long bs cells heat the GPU; if clocks throttle across a
+    sweep, cross-cell deltas reflect thermal headroom, not code. Lock clocks
+    (``nvidia-smi -lgc``) for clean numbers, or rescale post-hoc with
+    ``rescale_clocks.py`` using the recorded clock."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi",
+             "--query-gpu=clocks.current.graphics,temperature.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip().splitlines()[0]
+        clk, temp = (x.strip() for x in out.split(","))
+        return {"gpu_clock_mhz": int(clk), "gpu_temp_c": int(temp)}
+    except Exception:
+        return {}
+
+
 def _run_cell(args: argparse.Namespace) -> dict[str, Any]:
     import torch
     from vllm import LLM, SamplingParams
@@ -132,6 +151,7 @@ def _run_cell(args: argparse.Namespace) -> dict[str, Any]:
     try:
         for _ in range(args.warmup):
             llm.generate(prompts, sp_list)
+        gpu_start = _gpu_sample()
         samples_ms: list[float] = []
         for _ in range(args.iters):
             torch.cuda.synchronize()
@@ -139,6 +159,7 @@ def _run_cell(args: argparse.Namespace) -> dict[str, Any]:
             llm.generate(prompts, sp_list)
             torch.cuda.synchronize()
             samples_ms.append((time.perf_counter() - t0) * 1000.0)
+        gpu_end = _gpu_sample()
     finally:
         del llm
         gc.collect()
@@ -156,6 +177,12 @@ def _run_cell(args: argparse.Namespace) -> dict[str, Any]:
         "p90_ms": stats.p90_ms,
         "stddev_ms": stats.stddev_ms,
         "tokens_per_sec": tps,
+        # Thermal-drift transparency: clock/temp at the start vs end of the
+        # measured iters. A clock drop across a sweep means throttling is
+        # confounding cross-cell deltas — lock clocks or rescale.
+        "gpu_clock_start_mhz": gpu_start.get("gpu_clock_mhz"),
+        "gpu_clock_end_mhz": gpu_end.get("gpu_clock_mhz"),
+        "gpu_temp_end_c": gpu_end.get("gpu_temp_c"),
     }
 
 
@@ -200,6 +227,12 @@ def main() -> None:
     parser.add_argument("--enforce-eager", action="store_true",
                         help="disable cudagraphs (default: cudagraphs on)")
     parser.add_argument("--arms", default="", help="comma-subset of arms (default: all)")
+    parser.add_argument("--cooldown", type=float, default=0.0,
+                        help="seconds to idle before each cell so the GPU "
+                             "returns to a comparable thermal state (long bs "
+                             "cells otherwise heat the GPU and throttle later "
+                             "cells; locking clocks with `nvidia-smi -lgc` is "
+                             "the cleaner fix)")
     parser.add_argument("--output-dir", default="results/dynamic_steering/")
     parser.add_argument("--tag", default="")
     # Internal single-cell mode.
@@ -235,6 +268,8 @@ def main() -> None:
         print(f"--- batch_size={batch_size} ---")
         baseline_mean: float | None = None
         for arm in arms:
+            if args.cooldown > 0:
+                time.sleep(args.cooldown)
             r = _cell_subprocess(args, arm, batch_size)
             if "error" in r:
                 print(f"    [{arm}] ERROR: {r['error']}")
@@ -248,8 +283,10 @@ def main() -> None:
             )
             r["overhead_pct"] = overhead
             ov = f"{overhead:+.1f}%" if overhead is not None else "baseline"
+            clk = r.get("gpu_clock_end_mhz")
+            clk_s = f" clk={clk}MHz" if clk else ""
             print(f"    [{arm:<14}] mean={r['mean_ms']:.1f}ms "
-                  f"tps={r['tokens_per_sec']:.0f} overhead={ov}")
+                  f"tps={r['tokens_per_sec']:.0f} overhead={ov}{clk_s}")
             write_result(
                 benchmark="steering.dynamic",
                 parameters={
