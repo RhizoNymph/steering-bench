@@ -220,7 +220,39 @@ enough GPU. Under cudagraphs the replay is fast, and at bs>16 the per-step
 host work stops being overlapped → exposed. (Eager pays per-op launch cost
 anyway and the long forward hides it → +0.5%.)
 
-### Primary driver (evidence-backed conclusion)
+### CONFIRMED: the mutating `steering_monitor` op is the dominant culprit
+
+1-line diagnostic — skip emitting `torch.ops.vllm.steering_monitor` in
+`apply_layer_steering` (node0, locked 1710, static steering):
+
+| bs | feat/int (4-arg) | ds static +monitor | ds static **−monitor** |
+|---:|----:|----:|----:|
+| 24 | +2.5% | +3.8% | **+2.1%** |
+| 32 | +0.4% | +6.7% | **+1.8%** |
+
+At bs=32 the **mutating monitor op accounts for ~5% of the 6.7%**. The
+residual +1.8% is the 8-arg `apply_steering` (~+1.4% over feat/int's 4-arg,
+non-mutating → much friendlier). Tier vs static adds the final ~1.9%
+(+8.6% tier − 6.7% static). So, by contribution at bs=32:
+**monitor op ≈ 5% · 8-arg apply_steering ≈ 1.4% · tier machinery ≈ 1.9%.**
+
+`steering_monitor` is `mutates_args=["steering_token_scales",
+"steering_row_gate"]` and is emitted **unconditionally at every hook×layer
+when `enable_steering=True`** (for stable topology / runtime toggling) —
+even though an in-graph monitor is an opt-in Phase-2 feature almost never
+configured. So the common steering user pays ~5% for a no-op mutating op
+that's cudagraph-hostile.
+
+**Fix (high-leverage, low-risk): stop emitting `steering_monitor` unless a
+monitor is actually configured.** Most usage has no monitor → the op
+shouldn't be in the graph. Keep stable topology by deciding emission from
+the operator-declared monitor sites at startup (recapture only if a monitor
+is first configured at runtime — rare). That alone removes ~5%. Then trim
+the 8-arg `apply_steering` (fold defaults so the common scale=1/row_gate=1/
+token_scales=0/dvec=0 path reads fewer buffers, approaching the lean 4-arg
+cost) for the residual ~1.4%.
+
+### Primary driver (superseded — see "CONFIRMED" above)
 
 The **FULL→eager/PIECEWISE cudagraph downgrade** is the main wall-clock cost,
 and it hits **both** static and dynamic: with steering on, `cudaGraphLaunch`
