@@ -15,8 +15,9 @@ Usage (profile off, then steer; then diff the stats):
       --trace=cuda,nvtx,osrt -o /tmp/nsys_off \
       python scripts/nsys_steering_cell.py --arm off --batch-size 24 \
         --model ~/Models/gemma-4-31B-it-Q4_K_S.gguf
-    ... --arm steer ... -o /tmp/nsys_steer
-    nsys stats --report cuda_api_sum,cuda_gpu_kern_sum /tmp/nsys_steer.nsys-rep
+    ... --arm static  ... -o /tmp/nsys_static   # 8-arg op (table gather)
+    ... --arm dynamic ... -o /tmp/nsys_dynamic  # §5.4 tier via consumer
+    nsys stats --report cuda_api_sum,cuda_gpu_kern_sum /tmp/nsys_dynamic.nsys-rep
 """
 
 from __future__ import annotations
@@ -30,7 +31,12 @@ os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--arm", choices=["off", "steer"], required=True)
+    # off      : no steering (baseline)
+    # static   : SamplingParams.steering_vectors (table gather, 8-arg op)
+    # dynamic  : §5.4 dynamic tier via the bench_steer_async consumer
+    #            (per-step token_scales/dvec machinery) — needs steering-bench
+    #            installed in the venv for the entry point.
+    p.add_argument("--arm", choices=["off", "static", "dynamic"], required=True)
     p.add_argument("--model", required=True)
     p.add_argument("--batch-size", type=int, default=24)
     p.add_argument("--layer", type=int, default=30)
@@ -48,10 +54,9 @@ def main() -> None:
     import torch
     from vllm import LLM, SamplingParams
 
-    steer = args.arm == "steer"
     prompts = [" ".join(["hello"] * max(1, int(args.prompt_len / 1.3)))] * args.batch_size
     sp_kwargs = dict(max_tokens=args.output_len, temperature=0.0, seed=0)
-    if steer:
+    if args.arm == "static":
         v = np.random.default_rng(1).standard_normal(args.hidden).astype(np.float32)
         v = v / float(np.linalg.norm(v)) * args.norm
         sp_kwargs["steering_vectors"] = {args.hook: {args.layer: v.tolist()}}
@@ -62,8 +67,14 @@ def main() -> None:
         max_model_len=args.prompt_len + args.output_len + 64,
         enforce_eager=args.enforce_eager, seed=0,
     )
-    if steer:
+    if args.arm in ("static", "dynamic"):
         kwargs["enable_steering"] = True
+    if args.arm == "dynamic":
+        kwargs["max_dynamic_steering_configs"] = 4
+        kwargs["capture_consumers"] = [
+            {"name": "bench_steer_async",
+             "params": {"layer": args.layer, "norm": args.norm}}
+        ]
     llm = LLM(**kwargs)
 
     for _ in range(args.warmup):
