@@ -116,15 +116,45 @@ branches have **no C++ diff**, so the compiled `.so` is portable).
 
 _(filling in as the run completes — bs=16,24,32, off vs steer)_
 
-| batch | steer overhead |
+feat/integration `steer` = static table gather; dynamic-steering
+`steer_async` = the §5.4 dynamic tier (per-step `token_scales`/`dvec`).
+Cudagraph, locked 1710, off vs steer:
+
+| batch | feat/integration static | dynamic-steering tier (`steer_async`) |
+|------:|----:|----:|
+| 16 | +0.2% | +0.5% |
+| 24 | +2.5% | **+10.8%** |
+| 32 | **+0.4%** | **+8.6%** |
+
+**feat/integration static steering is flat** — +0.2 / +2.5 / +0.4% across
+bs=16/24/32 (the bs=24 +2.5% is a minor blip, not the spike). The
+dynamic-steering tier is +8–11% at bs>16. **So the spike is NOT pre-existing
+— dynamic steering introduced it.** (Same machine, same held 1710 MHz, same
+model, same cudagraph mode; only the branch + steering path differ.)
+
+Remaining question — *which* dynamic-steering change:
+- the 8-arg `apply_steering` op (extra `scales`/`dvec`/`token_scales`/
+  `row_gate` gather in the captured graph), or
+- the dynamic-**tier** per-step machinery (runner writes `token_scales`/
+  `dvec` each step; `steer_async` uses the tier, feat/integration has none).
+
+Isolated by **static steering on the dynamic-steering branch** (8-arg op,
+but no tier → `token_scales`/`dvec` stay 0, not written per step):
+
+| batch | dynamic-steering static |
 |------:|----:|
-| 16 | +0.2% |
-| 24 | _pending_ |
-| 32 | _pending_ |
+| 16 | _running_ |
+| 24 | _running_ |
+| 32 | _running_ |
+
+- If flat (~feat/integration) ⇒ cause is the **dynamic-tier per-step
+  machinery**, not the op signature.
+- If it spikes ⇒ cause is the **8-arg op** in the captured graph.
 
 ### Verdict
 
-_pending — see above._
+**Introduced by dynamic steering** (feat/integration is clean). Sub-cause
+pending the dynamic-steering static run + nsys.
 
 ## 6. nsys root cause
 
