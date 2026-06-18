@@ -175,8 +175,59 @@ kernel so an all-defaults invocation degenerates to the lean
 
 ## 6. nsys root cause
 
-_pending — profiling the spiking config (bs=24 cudagraph, off vs steer),
-comparing `cuda_api_sum` / `cuda_gpu_kern_sum` for the per-step stall._
+nsys traces at **bs=32 cudagraph**, capture-range bracketed around the
+measured iters (`scripts/nsys_steering_cell.py`, `--arm off|static|dynamic`),
+`--trace=cuda,nvtx`. Reports: `cuda_gpu_kern_sum`, `cuda_api_sum`.
+
+**GPU compute is identical across arms** — the dominant GGUF matmul
+(`mul_mat_q4_K`) totals ~15.7–15.85 s in all three (off 15.71 / static 15.77
+/ dynamic 15.85 s). So the +6.7–8.6% wall-clock is **entirely host-side
+serialization**, not GPU work. Host-side `cuda_api_sum` deltas vs `off`:
+
+| API call | off | static | dynamic |
+|---|---|---|---|
+| `cudaStreamSynchronize` | ~absent | 7.5 s / 372 (med **3.7 µs**) | **74 s / 288 (med 254 ms)** |
+| `cudaLaunchKernel` | 2.3 s / **6,681** | 5.97 s / **14,442** | 3.5 s / 10,620 |
+| `cudaGraphLaunch` | 603 | 468 | 468 |
+
+Two host-side mechanisms, both introduced by enabling steering:
+
+1. **Steering ops break the FULL cudagraph.** Static steering (no consumer)
+   more than **doubles `cudaLaunchKernel`** (6.7k→14.4k) and *reduces*
+   `cudaGraphLaunch` (603→468): the `apply_steering` custom op is not fused
+   into the full graph, so steered layers fall back to extra per-layer eager
+   launches. Its `cudaStreamSynchronize` is median ~3.7 µs (no-ops) — the
+   cost is launch/overlap, not blocking. This is the bulk of static's +6.7%.
+2. **The capture consumer adds heavy host-blocking syncs.** The dynamic arm
+   (tier via `bench_steer_async`, which carries a global capture spec) shows
+   `cudaStreamSynchronize` **median 254 ms × 288** — the host blocks mid-step.
+   This is on top of (1) and drives dynamic to +8.6%. (Note capture-only with
+   steering *disabled* was +1% in the 6-arm bench, so it's the
+   capture+steering *combination* that stalls — likely the residual capture /
+   APC decode-signature path interacting with steering.)
+
+**Why only bs>16:** GPU compute is unchanged, so the fixed host overhead
+(extra launches + syncs) is hidden while the host can race ahead of a slow
+enough GPU. Under cudagraphs the replay is fast, and at bs>16 the per-step
+host work stops being overlapped → exposed. (Eager pays per-op launch cost
+anyway and the long forward hides it → +0.5%.)
+
+### Still open (morning)
+
+- Exact call site of the dynamic arm's 254 ms `cudaStreamSynchronize`
+  (re-profiling with `--cudabacktrace=sync` to get the stack — running).
+- Confirm the FULL-graph break: check `cudagraph` capture logs / inspect
+  whether `apply_steering` is in `splitting_ops` or treated as a break.
+
+### Fix directions
+
+- **Make `apply_steering` cudagraph-fusable / not a graph break** — the
+  highest-leverage fix; would remove the extra launches (static's +6.7%).
+  Check how the custom op is registered vs the `splitting_ops` list.
+- **Decouple the capture-consumer sync from the step thread** when steering
+  is active (the 254 ms blocking syncs) — keep capture dispatch fully async.
+- Both are host-side; neither changes GPU work, so a fix should bring the
+  cudagraph numbers down to the eager <1%.
 
 ## 7. Reproduce
 
