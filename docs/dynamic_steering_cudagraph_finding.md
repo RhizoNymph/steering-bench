@@ -138,23 +138,40 @@ Remaining question — *which* dynamic-steering change:
 - the dynamic-**tier** per-step machinery (runner writes `token_scales`/
   `dvec` each step; `steer_async` uses the tier, feat/integration has none).
 
-Isolated by **static steering on the dynamic-steering branch** (8-arg op,
-but no tier → `token_scales`/`dvec` stay 0, not written per step):
+Three-way comparison, cudagraph, locked 1710, off vs steer:
 
-| batch | dynamic-steering static |
-|------:|----:|
-| 16 | _running_ |
-| 24 | _running_ |
-| 32 | _running_ |
+| batch | feat/int static (4-arg) | ds static (8-arg) | ds tier (`steer_async`) |
+|------:|----:|----:|----:|
+| 16 | +0.2% | +0.3% | +0.5% |
+| 24 | +2.5% | +3.8% | +10.8% |
+| 32 | **+0.4%** | **+6.7%** | **+8.6%** |
 
-- If flat (~feat/integration) ⇒ cause is the **dynamic-tier per-step
-  machinery**, not the op signature.
-- If it spikes ⇒ cause is the **8-arg op** in the captured graph.
+(bs=24 is a noisy/bad-bucket size across all configs — feat/int static is
++2.5% there but +0.4% at 32. Read bs=32 as the clean signal.)
 
 ### Verdict
 
-**Introduced by dynamic steering** (feat/integration is clean). Sub-cause
-pending the dynamic-steering static run + nsys.
+**Introduced by dynamic steering.** feat/integration's lean 4-arg
+`apply_steering` (`out = hidden + table[index]`) is essentially free under
+cudagraph (+0.4% at bs=32). Dynamic steering's **8-arg op** —
+`out = hidden + table[rows]*scale[rows]*row_gate + dvec*token_scales`, i.e.
+**4 extra per-token buffer reads** (`steering_scales`, `steering_row_gate`,
+`steering_dynamic_vec`, `steering_token_scales`) at every steered layer —
+spikes to +6.7% at bs=32 *even for static steering with the tier at
+defaults*. The dynamic tier's per-step `token_scales`/`dvec` writes add a
+further ~2% (+8.6%). All of it is cudagraph-specific (eager ds-steer is
++0.5%) and only above bs=16.
+
+So the regression is the **8-arg op's extra buffer reads in the captured
+graph**, exposed once the GPU replay is fast enough (cudagraph) and the
+batch is large enough (>16) that this per-token memory traffic / launch
+shape stops being hidden. nsys (§6) pinpoints the exact mechanism.
+
+Likely fix directions (to confirm with nsys): collapse the four extra
+per-token gathers into fewer reads / fold defaults so the common path
+(scale=1, row_gate=1, token_scales=0, dvec=0) reads less; or specialize the
+kernel so an all-defaults invocation degenerates to the lean
+`hidden + table[index]` path.
 
 ## 6. nsys root cause
 
