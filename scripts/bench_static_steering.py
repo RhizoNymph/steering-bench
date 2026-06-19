@@ -65,16 +65,6 @@ def _run_cell(args) -> dict:
     steer = args.arm == "steer"
     prompts = [" ".join(["hello"] * max(1, int(args.prompt_len / 1.3)))] * args.batch_size
 
-    sp_kwargs = dict(max_tokens=args.output_len, temperature=0.0, seed=0)
-    if steer:
-        rng = np.random.default_rng(1)
-        v = rng.standard_normal(args.hidden).astype(np.float32)
-        v = v / float(np.linalg.norm(v)) * args.norm
-        # SteeringVectorSpec: {hook: {layer: [floats]}}, base phase (prefill+decode).
-        sp_kwargs["steering_vectors"] = {args.hook: {args.layer: v.tolist()}}
-    sp = SamplingParams(**sp_kwargs)
-    sp_list = [sp] * args.batch_size
-
     kwargs = dict(
         model=args.model,
         gpu_memory_utilization=args.gpu_mem_util,
@@ -94,6 +84,18 @@ def _run_cell(args) -> dict:
         }
 
     llm = LLM(**kwargs)
+
+    # Build the steer vector AFTER the model loads so we can auto-detect the
+    # hidden size (``--hidden`` overrides; needed for GGUF repos with no
+    # config.json). Base-phase steering applies to prefill + decode.
+    sp_kwargs = dict(max_tokens=args.output_len, temperature=0.0, seed=0)
+    if steer:
+        hidden = args.hidden or llm.llm_engine.model_config.get_hidden_size()
+        v = np.random.default_rng(1).standard_normal(hidden).astype(np.float32)
+        v = v / float(np.linalg.norm(v)) * args.norm
+        sp_kwargs["steering_vectors"] = {args.hook: {args.layer: v.tolist()}}
+    sp_list = [SamplingParams(**sp_kwargs)] * args.batch_size
+
     try:
         for _ in range(args.warmup):
             llm.generate(prompts, sp_list)
@@ -122,11 +124,13 @@ def _run_cell(args) -> dict:
 def _cell_subprocess(args, arm, bs) -> dict:
     cmd = [sys.executable, os.path.abspath(__file__), "--cell",
            "--arm", arm, "--batch-size", str(bs), "--model", args.model,
-           "--layer", str(args.layer), "--hidden", str(args.hidden),
+           "--layer", str(args.layer),
            "--norm", str(args.norm), "--prompt-len", str(args.prompt_len),
            "--output-len", str(args.output_len), "--warmup", str(args.warmup),
            "--iters", str(args.iters), "--gpu-mem-util", str(args.gpu_mem_util),
            "--hook", args.hook]
+    if args.hidden is not None:
+        cmd += ["--hidden", str(args.hidden)]
     if args.enforce_eager:
         cmd.append("--enforce-eager")
     if getattr(args, "af2", False):
@@ -146,7 +150,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", required=True)
     p.add_argument("--layer", type=int, default=30)
-    p.add_argument("--hidden", type=int, default=5376, help="model hidden size")
+    p.add_argument("--hidden", type=int, default=None,
+                   help="model hidden size (auto-detected from the model if omitted)")
     p.add_argument("--hook", default="post_mlp")
     p.add_argument("--norm", type=float, default=8.0)
     p.add_argument("--batch-sizes", default="16,24,32")
