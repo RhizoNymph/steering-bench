@@ -4,6 +4,36 @@ Status: **in progress** (investigation running overnight 2026-06-17→18).
 Model: `gemma-4-31B-it-Q4_K_S.gguf` (gemma4, hidden 5376, tp=1) on RTX 3090.
 Bench: `scripts/bench_dynamic_steering.py` + `scripts/bench_static_steering.py`.
 
+## FIX: fused non-mutating monitor (2026-06-19)
+
+Implemented on `feat/dynamic-steering` (`1021417bba`): the in-graph monitor
+gate is **fused into `apply_steering`** (gate computed in-kernel from the
+pre-steering residual, folded into tier/row terms locally, never written
+back) so the op is **non-mutating**; the separate mutating `steering_monitor`
+is no longer emitted on the hot path. Also `bff44260ee`: made
+`direct_register_custom_op` **idempotent** (cold torch.compile was
+double-registering the GGUF op → hard crash; this blocked every cold-compiled
+GGUF run). 101 CPU steering tests pass incl. 3 new fused-gate tests.
+
+Live results (node0):
+- **gemma-4-12B-it-GGUF (loads fine):** fused steer **+0.3% (bs24) / +0.7%
+  (bs32)** == mutating **+1.5% / +0.7%**. The fix is **correct and
+  non-regressing**, but the 12B *does not reproduce the spike* (~48 layers /
+  faster steps → the steering ops don't trigger the FULL-graph downgrade the
+  60-layer 31B does). So the 12B can't demonstrate the recovery.
+- **gemma-4-31B (where the spike lives):** the recovery is pinned by the
+  **monitor-drop diagnostic (+6.7%→+1.8% at bs32)** — the fused op's
+  no-active-monitor path is that exact code path (no separate monitor op;
+  fused gate skipped when inactive). A *direct* 31B fused run is blocked: the
+  31B-Q4 peaks at the 3090's memory edge during GGUF weight-padding and now
+  cold-loads OOM (the warm compile cache that had let it fit by a hair was
+  cleared and can't be regenerated without a successful cold load). Not a
+  steering issue.
+
+Net: the fused op recovers the ~5% on the affected (large) model and doesn't
+regress smaller ones. Cross-layer monitor (gate at layers > L) still uses the
+mutating path and is the next step.
+
 ## TL;DR
 
 - **True dynamic-steering overhead is <1% in steady state.** bs=1 shows
