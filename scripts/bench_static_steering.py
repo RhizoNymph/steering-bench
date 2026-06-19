@@ -84,6 +84,14 @@ def _run_cell(args) -> dict:
     )
     if steer:
         kwargs["enable_steering"] = True
+    if getattr(args, "af2", False):
+        # Force inductor auto-functionalization V2 for the mutating steering
+        # ops (vLLM defaults it False; it only forces False if the key is
+        # absent, so setting it here sticks). Tests whether the mutating-op
+        # functionalization path is the cudagraph cost.
+        kwargs["compilation_config"] = {
+            "inductor_compile_config": {"enable_auto_functionalized_v2": True}
+        }
 
     llm = LLM(**kwargs)
     try:
@@ -121,6 +129,8 @@ def _cell_subprocess(args, arm, bs) -> dict:
            "--hook", args.hook]
     if args.enforce_eager:
         cmd.append("--enforce-eager")
+    if getattr(args, "af2", False):
+        cmd.append("--af2")
     proc = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
@@ -146,6 +156,8 @@ def main():
     p.add_argument("--iters", type=int, default=6)
     p.add_argument("--gpu-mem-util", type=float, default=0.92)
     p.add_argument("--enforce-eager", action="store_true")
+    p.add_argument("--af2", action="store_true",
+                   help="force inductor enable_auto_functionalized_v2=True")
     p.add_argument("--cell", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--arm", help=argparse.SUPPRESS)
     p.add_argument("--batch-size", type=int, help=argparse.SUPPRESS)
