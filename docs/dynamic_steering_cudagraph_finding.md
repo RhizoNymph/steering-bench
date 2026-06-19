@@ -243,6 +243,14 @@ even though an in-graph monitor is an opt-in Phase-2 feature almost never
 configured. So the common steering user pays ~5% for a no-op mutating op
 that's cudagraph-hostile.
 
+**`auto_functionalized_v2=True` is NOT a usable fix here.** Tested both ways
+on node0 (pass via `compilation_config`, and flip the vLLM default in
+`compilation.py:904`): both **crash with a GGUF op double-registration**
+(`vllm::_fused_mul_mat_gguf` registered twice at torch_utils.py:928) — the V2
+functionalization transform re-registers the GGUF custom op. (This is why
+vLLM defaults V2 off; its own comment flags V2 incompatibilities with custom
+passes.) So we can't lean on the flag — the fix must be at the op level.
+
 **Fix (high-leverage, low-risk): stop emitting `steering_monitor` unless a
 monitor is actually configured.** Most usage has no monitor → the op
 shouldn't be in the graph. Keep stable topology by deciding emission from
