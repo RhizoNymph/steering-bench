@@ -20,7 +20,7 @@ enabled_idle, per_request_1, per_request_4) it sweeps three capture states:
                 empty, captures the per-step bookkeeping overhead with no
                 actual gather/dispatch work
   cap_on_active same filesystem consumer + per-request capture asking for
-                last_prompt at (post_mlp, layer L) — manager builds a plan,
+                last_prompt at (post_block, layer L) — manager builds a plan,
                 gathers rows, dispatches chunks to the writer
 
 The filesystem consumer is used (rather than logging) because it has
@@ -128,15 +128,15 @@ def _build_capture_field(
       rows per request. Stresses the gather kernel and the writer thread.
     """
     if capture_spec == "minimal":
-        hooks = {"post_mlp": [capture_layer]}
+        hooks = {"post_block": [capture_layer]}
         positions: str = "last_prompt"
     elif capture_spec == "medium":
         every_fourth = list(range(0, num_layers, 4))
-        hooks = {"post_mlp": every_fourth}
+        hooks = {"post_block": every_fourth}
         positions = "all_generated"
     elif capture_spec == "heavy":
         all_layers = list(range(num_layers))
-        hooks = {"post_mlp": all_layers, "post_attn": all_layers}
+        hooks = {"post_block": all_layers, "post_attn": all_layers}
         positions = "all"
     else:
         raise ValueError(
@@ -189,7 +189,7 @@ def _build_sampling_params(
         vectors = random_steering_vectors(
             hidden_size=hidden_size,
             num_layers=num_layers,
-            hook_points=["post_mlp"],
+            hook_points=["post_block"],
             scale=0.1,
             seed=42,
         )
@@ -200,7 +200,7 @@ def _build_sampling_params(
             hidden_size=hidden_size,
             num_layers=num_layers,
             num_configs=4,
-            hook_points=["post_mlp"],
+            hook_points=["post_block"],
             scale=0.1,
             base_seed=42,
         )

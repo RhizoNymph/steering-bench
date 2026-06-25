@@ -110,7 +110,7 @@ def main():
             vectors = random_steering_vectors(
                 hidden_size=model_config["hidden_size"],
                 num_layers=model_config["num_layers"],
-                hook_points=["post_mlp"],
+                hook_points=["post_block"],
                 scale=0.1,
                 seed=42,
             )
@@ -129,7 +129,7 @@ def main():
                 vectors = random_steering_vectors(
                     hidden_size=model_config["hidden_size"],
                     num_layers=model_config["num_layers"],
-                    hook_points=["post_mlp"],
+                    hook_points=["post_block"],
                     scale=0.1,
                     seed=42 + i,
                 )

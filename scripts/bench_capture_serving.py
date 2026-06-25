@@ -152,7 +152,7 @@ def main():
     ap.add_argument("--req-timeout", type=float, default=600)
     ap.add_argument("--capture", action="store_true")
     ap.add_argument("--tag", default="bench")
-    ap.add_argument("--hooks", default='{"post_mlp": "all"}')
+    ap.add_argument("--hooks", default='{"post_block": "all"}')
     ap.add_argument("--label", default="run")
     ap.add_argument("--out", default=None)
     asyncio.run(run(ap.parse_args()))

@@ -255,7 +255,7 @@ def main():
                     hidden_size=model_config["hidden_size"],
                     num_layers=model_config["num_layers"],
                     num_configs=distinct,
-                    hook_points=["post_mlp"],
+                    hook_points=["post_block"],
                     scale=0.1,
                     base_seed=42,
                 )

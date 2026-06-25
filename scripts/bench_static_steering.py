@@ -152,7 +152,7 @@ def main():
     p.add_argument("--layer", type=int, default=30)
     p.add_argument("--hidden", type=int, default=None,
                    help="model hidden size (auto-detected from the model if omitted)")
-    p.add_argument("--hook", default="post_mlp")
+    p.add_argument("--hook", default="post_block")
     p.add_argument("--norm", type=float, default=8.0)
     p.add_argument("--batch-sizes", default="16,24,32")
     p.add_argument("--output-len", type=int, default=64)

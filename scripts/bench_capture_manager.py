@@ -206,7 +206,7 @@ def main():
     parser.add_argument("--prompt-len", type=int, default=64)
     parser.add_argument(
         "--hook-name",
-        default="post_mlp",
+        default="post_block",
         help="(legacy) Single hook name. Ignored if --hook-sets is set.",
     )
     parser.add_argument(
@@ -215,7 +215,7 @@ def main():
         help=(
             "Semicolon-separated list of comma-separated hook-name sets. "
             "Each set becomes one sweep run, so "
-            "'post_mlp;post_mlp,post_attn;post_mlp,post_attn,pre_mlp,pre_attn' "
+            "'post_block;post_block,post_attn;post_block,post_attn,pre_mlp,pre_attn' "
             "runs three passes with 1, 2, and 4 hooks respectively. "
             "Default behavior (unset) uses --hook-name as a single-hook set."
         ),

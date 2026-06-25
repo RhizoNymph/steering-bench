@@ -152,7 +152,7 @@ def _run_one(
     ).numpy().tobytes()
     assert len(payload) == chunk_bytes
 
-    layer, hook_name = 0, "post_mlp"
+    layer, hook_name = 0, "post_block"
 
     # Emit all tasks.
     t_start = time.perf_counter()

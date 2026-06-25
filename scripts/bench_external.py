@@ -175,7 +175,7 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--layer", type=int, default=8)
-    parser.add_argument("--hook", default="post_mlp")
+    parser.add_argument("--hook", default="post_block")
     parser.add_argument("--prompt-len", type=int, default=64)
     parser.add_argument("--libraries", default="all", help="Comma-separated library names or 'all'")
     parser.add_argument("--skip-tier1", action="store_true")

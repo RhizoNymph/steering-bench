@@ -665,7 +665,7 @@ def main() -> None:
     shared = random_steering_vectors(
         hidden_size=model_cfg["hidden_size"],
         num_layers=model_cfg["num_layers"],
-        hook_points=["post_mlp"],
+        hook_points=["post_block"],
         scale=0.1,
         seed=42,
     )
@@ -673,7 +673,7 @@ def main() -> None:
         hidden_size=model_cfg["hidden_size"],
         num_layers=model_cfg["num_layers"],
         num_configs=4,
-        hook_points=["post_mlp"],
+        hook_points=["post_block"],
         scale=0.1,
         base_seed=100,
     )
@@ -681,7 +681,7 @@ def main() -> None:
         hidden_size=model_cfg["hidden_size"],
         num_layers=model_cfg["num_layers"],
         num_configs=16,
-        hook_points=["post_mlp"],
+        hook_points=["post_block"],
         scale=0.1,
         base_seed=200,
     )

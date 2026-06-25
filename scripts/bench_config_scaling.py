@@ -110,7 +110,7 @@ def run_config(
         hidden_size=hidden_size,
         num_layers=num_layers,
         num_configs=actual_distinct,
-        hook_points=["post_mlp"],
+        hook_points=["post_block"],
         scale=0.1,
         base_seed=42,
     )

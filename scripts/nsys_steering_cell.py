@@ -41,7 +41,7 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=24)
     p.add_argument("--layer", type=int, default=30)
     p.add_argument("--hidden", type=int, default=5376)
-    p.add_argument("--hook", default="post_mlp")
+    p.add_argument("--hook", default="post_block")
     p.add_argument("--norm", type=float, default=8.0)
     p.add_argument("--prompt-len", type=int, default=64)
     p.add_argument("--output-len", type=int, default=64)
