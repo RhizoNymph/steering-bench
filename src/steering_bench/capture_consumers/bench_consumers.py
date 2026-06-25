@@ -41,12 +41,13 @@ import numpy as np
 from vllm.v1.capture.consumer import CaptureConsumer
 from vllm.v1.capture.types import CaptureSpec
 from vllm.v1.worker.steering_action_queue import (
+    RequestSteeringOverride,
     SteeringMonitorUpdate,
     SteeringVectorUpdate,
     get_steering_action_queue,
 )
 
-_HOOK = "post_mlp"
+_HOOK = "post_block"
 
 
 def _unit(hidden: int, seed: int) -> np.ndarray:
@@ -59,6 +60,12 @@ class _Base:
     """Shared config loading + global capture spec for the bench consumers."""
 
     location: ClassVar[Literal["worker"]] = "worker"
+
+    @classmethod
+    def declared_graphsafe_keys(cls, params: dict) -> list:
+        # Sync consumers read the StepCaptureView directly; no per-request
+        # graph-safe pre-buffering needed. Matches CaptureConsumer default.
+        return []
     reads_client_spec: ClassVar[bool] = False
 
     def __init__(self, vllm_config: Any, params: dict[str, Any]) -> None:
@@ -181,3 +188,43 @@ class BenchSteerDynamic(_Base):
                 source="bench_steer_dynamic",
             ),
         ]
+
+
+
+class BenchSteerPerRequest(_Base):
+    """Per-request dynamic steering via the override pool. Instead of one
+    global tier, install a DISTINCT ``RequestSteeringOverride`` for each
+    request the first decode step it appears (distinct dyn_id row + distinct
+    vector). Measures the per-request routing overhead (distinct rows,
+    ``steering_index`` rebuild, ``req_id -> dyn_id`` resolution) under the
+    override pool, vs the global-tier ``steer_dynamic`` arm."""
+
+    execution: ClassVar[Literal["sync"]] = "sync"
+
+    def __init__(self, vllm_config: Any, params: dict[str, Any]) -> None:
+        super().__init__(vllm_config, params)
+        self._seen: set[str] = set()
+        self._next_seed = 1000
+
+    def on_step(self, view: Any) -> list[Any] | None:
+        self._steps += 1
+        if self._hidden is None:
+            return None
+        actions: list[Any] = []
+        for req in getattr(view, "requests", []):
+            rid = getattr(req, "req_id", None)
+            if rid is None or getattr(req, "phase", None) != "decode":
+                continue
+            if rid in self._seen:
+                continue
+            self._seen.add(rid)
+            vec = _unit(self._hidden, self._next_seed) * self._norm
+            self._next_seed += 1
+            actions.append(
+                RequestSteeringOverride(
+                    req_id=rid,
+                    vectors={self._hook: {self._layer: vec}},
+                    source="bench_steer_per_request",
+                )
+            )
+        return actions or None

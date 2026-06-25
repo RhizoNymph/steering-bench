@@ -43,6 +43,7 @@ bench_capture_sync = "steering_bench.capture_consumers.bench_consumers:BenchCapt
 bench_steer_async = "steering_bench.capture_consumers.bench_consumers:BenchSteerAsync"
 bench_steer_sync = "steering_bench.capture_consumers.bench_consumers:BenchSteerSync"
 bench_steer_dynamic = "steering_bench.capture_consumers.bench_consumers:BenchSteerDynamic"
+bench_steer_per_request = "steering_bench.capture_consumers.bench_consumers:BenchSteerPerRequest"
 
 [tool.uv.sources]
 # Points to the capture-consumers vLLM fork (feat/capture-consumers branch).

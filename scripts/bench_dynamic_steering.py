@@ -90,6 +90,13 @@ ARMS: dict[str, tuple[bool, Any]] = {
             {"name": "bench_steer_dynamic", "params": {"layer": layer, "norm": norm}}
         ],
     ),
+    "steer_per_request": (
+        True,
+        lambda layer, norm: [
+            {"name": "bench_steer_per_request",
+             "params": {"layer": layer, "norm": norm}}
+        ],
+    ),
 }
 
 ARM_ORDER = list(ARMS.keys())
@@ -145,7 +152,12 @@ def _run_cell(args: argparse.Namespace) -> dict[str, Any]:
     )
     if enable_steering:
         kwargs["enable_steering"] = True
-        kwargs["max_dynamic_steering_configs"] = 4
+        # Per-request arm needs one override-pool row per concurrent request;
+        # tier arms use a single global config, so 4 is plenty for them.
+        if args.arm == "steer_per_request":
+            kwargs["max_dynamic_steering_configs"] = max(8, args.batch_size + 8)
+        else:
+            kwargs["max_dynamic_steering_configs"] = 4
 
     llm = LLM(**kwargs)
     try:
