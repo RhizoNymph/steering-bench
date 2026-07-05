@@ -45,6 +45,13 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=0
 export VLLM_USE_FLASHINFER_SAMPLER=0
 export VLLM_DISABLE_COMPILE_CACHE="${VLLM_DISABLE_COMPILE_CACHE:-1}"
 
+# node0 ~/.bashrc force-sets HF_HOME to an inaccessible NAS mount on every
+# non-interactive bash; pin HF at the real local cache and run offline
+# (all weights are cached locally). Override with SWEEP_HF_HOME if needed.
+export HF_HOME="${SWEEP_HF_HOME:-$HOME/.cache/huggingface}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+
 EAGER_FLAG=()
 [[ "${EAGER:-0}" == "1" ]] && EAGER_FLAG=(--enforce-eager)
 
