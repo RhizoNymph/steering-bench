@@ -72,7 +72,10 @@ def test_arm_flags_wiring():
     assert mod.ARM_FLAGS["steer_rowmon"] == (True, True)
     assert mod.ARM_FLAGS["steer_override"] == (True, False)
     assert mod.ARM_FLAGS["off"] == (False, False)
-    assert mod.PERREQ_ARMS == {"steer_override", "steer_rowmon"}
+    assert mod.ARM_FLAGS["steer_per_request"] == (True, False)
+    assert mod.PERREQ_ARMS == {
+        "steer_override", "steer_rowmon", "steer_per_request"
+    }
 
 
 def test_cell_argv_threads_all_site_params():

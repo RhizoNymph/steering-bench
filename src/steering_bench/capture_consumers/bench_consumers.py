@@ -138,6 +138,20 @@ class _Base:
     location: ClassVar[Literal["worker"]] = "worker"
     reads_client_spec: ClassVar[bool] = False
 
+    @classmethod
+    def declared_graphsafe_keys(cls, params: dict[str, Any]) -> list[str]:
+        """Graph-safe ``layer:hook`` keys to pre-buffer for per-request capture.
+
+        The capture registry calls this on the CLASS at config-build time
+        (``vllm/v1/capture/config.py`` — no instance constructed, and the call
+        is outside the load try/except), so a sync-only consumer that does not
+        expose it crashes registration. These bench consumers read the
+        ``StepCaptureView`` directly and need no per-request graph-safe
+        pre-buffering, so the list is empty. Matches ``CaptureConsumer``'s
+        default (which the async arms inherit anyway).
+        """
+        return []
+
     def __init__(self, vllm_config: Any, params: dict[str, Any]) -> None:
         model_config = getattr(vllm_config, "model_config", None)
         self._hidden = model_config.get_hidden_size() if model_config else None
@@ -364,3 +378,44 @@ class BenchSteerRowmon(_PerRequestBase):
                 source=self._SOURCE,
             )
         ]
+
+
+class BenchSteerPerRequest(_Base):
+    """Per-request dynamic steering via the override pool with a DISTINCT
+    vector per request (distinct dyn_id row + distinct seeded vector installed
+    the first decode step a request appears). Measures the per-request routing
+    overhead (distinct rows, ``steering_index`` rebuild, ``req_id -> dyn_id``
+    resolution) vs the global-tier arms. Unlike ``steer_override`` (equal
+    vectors, pruned live set) this stresses distinct-row composition."""
+
+    execution: ClassVar[Literal["sync"]] = "sync"
+
+    def __init__(self, vllm_config: Any, params: dict[str, Any]) -> None:
+        super().__init__(vllm_config, params)
+        self._seen: set[str] = set()
+        self._next_seed = 1000
+        # First steer site carries the per-request distinct vectors.
+        self._site_hook, self._site_layer = self._sites[0]
+
+    def on_step(self, view: Any) -> list[Any] | None:
+        self._steps += 1
+        if self._hidden is None:
+            return None
+        actions: list[Any] = []
+        for req in getattr(view, "requests", []):
+            rid = getattr(req, "req_id", None)
+            if rid is None or getattr(req, "phase", None) != "decode":
+                continue
+            if rid in self._seen:
+                continue
+            self._seen.add(rid)
+            vec = _unit(self._hidden, self._next_seed) * self._norm
+            self._next_seed += 1
+            actions.append(
+                RequestSteeringOverride(
+                    req_id=rid,
+                    vectors={self._site_hook: {self._site_layer: vec}},
+                    source="bench_steer_per_request",
+                )
+            )
+        return actions or None

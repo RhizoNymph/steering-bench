@@ -169,6 +169,29 @@ def test_rowmon_emits_monitor_after_override_same_list():
     assert c._SOURCE == "bench_steer_rowmon"
 
 
+def test_every_consumer_class_exposes_declared_graphsafe_keys():
+    """The capture registry calls this on the CLASS at config-build time
+    (outside a try/except), so a sync-only consumer missing it crashes
+    registration — a path the instance-level tests never exercise."""
+    for cls in (
+        bc.BenchCaptureAsync, bc.BenchCaptureSync,
+        bc.BenchSteerAsync, bc.BenchSteerSync, bc.BenchSteerDynamic,
+        bc.BenchSteerOverride, bc.BenchSteerRowmon, bc.BenchSteerPerRequest,
+    ):
+        assert cls.declared_graphsafe_keys({"layer": 17}) == []
+
+
+def test_per_request_distinct_vectors_no_prune():
+    c = bc.BenchSteerPerRequest(_cfg(), {"layers": [17], "hooks": ["post_block"]})
+    out = c.on_step(_FakeView([_FakeReq("a", "decode"), _FakeReq("b", "decode")]))
+    assert {a.req_id for a in out} == {"a", "b"}
+    va = out[0].vectors["post_block"][17]
+    vb = out[1].vectors["post_block"][17]
+    assert not np.allclose(va, vb)  # distinct per request
+    assert out[0].source == "bench_steer_per_request"
+    assert c.on_step(_FakeView([_FakeReq("a", "decode")])) is None  # a already seen
+
+
 def test_live_consumer_registry_tracks_instances():
     bc.reset_live_consumers()
     a = bc.BenchCaptureSync(_cfg(), {"layer": 17})

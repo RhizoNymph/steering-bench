@@ -80,12 +80,15 @@ ARM_FLAGS: dict[str, tuple[bool, bool]] = {
     "steer_dynamic": (True, False),
     "steer_override": (True, False),
     "steer_rowmon": (True, True),
+    # Distinct-vector-per-request override (merged from the parallel bench
+    # effort); measured like the override arm via applied-counter activation.
+    "steer_per_request": (True, False),
 }
 ARM_ORDER = list(ARM_FLAGS.keys())
 STEER_ARMS = {a for a, (s, _) in ARM_FLAGS.items() if s}
 CAPTURE_ARMS = {"capture_async", "capture_sync"}
 # Per-request override arms need one dynamic-pool row per concurrent request.
-PERREQ_ARMS = {"steer_override", "steer_rowmon"}
+PERREQ_ARMS = {"steer_override", "steer_rowmon", "steer_per_request"}
 
 
 # --------------------------------------------------------------------------
