@@ -32,6 +32,7 @@ NAMED_BENCH_MODULE = "bench_named_shared"
 
 # Model constants (Gemma-3-4B-IT)
 MODEL_CONFIGS = {
+    "Qwen/Qwen3-0.6B": {"hidden_size": 1024, "num_layers": 28},
     "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
     "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
     "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
