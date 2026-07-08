@@ -66,6 +66,12 @@ All results share a common JSON schema with environment metadata, parameters, an
 - depends_on: [core]
 - doc: docs/features/external_comparison.md
 
+### engine_abstraction
+- description: Typed engine seam — a `SteeringEngine` ABC with a `Capabilities` descriptor, a canonical `SteeringSpec`/`NamedModuleRef` domain model, a capability-aware engine registry, and vLLM + TransformerLens adapters. Lets a new engine be one adapter class and lets the registry filter engines by required capabilities. Additive in Phase A; migrating existing scripts onto this seam is Phase B/C.
+- entry_points: [src/steering_bench/engine/spec.py, src/steering_bench/engine/base.py, src/steering_bench/engine/registry.py, src/steering_bench/engine/engines/vllm.py, src/steering_bench/engine/engines/transformerlens.py]
+- depends_on: [core]
+- doc: docs/features/engine_abstraction.md
+
 ### analysis
 - description: Result aggregation and matplotlib chart generation
 - entry_points: [scripts/analyze.py]

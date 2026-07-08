@@ -54,7 +54,7 @@ def capture_environment() -> dict[str, Any]:
             env["gpu_clock_current_mhz"] = int(parts[0])
             env["gpu_clock_max_mhz"] = int(parts[1])
             env["clocks_pinned"] = abs(int(parts[0]) - int(parts[1])) < 50
-        except (subprocess.SubprocessError, FileNotFoundError, (ValueError, IndexError)):
+        except (subprocess.SubprocessError, FileNotFoundError, ValueError, IndexError):
             env["clocks_pinned"] = False
     else:
         env["gpu"] = "none"
