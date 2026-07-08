@@ -4,6 +4,17 @@
 
 End-to-end overhead measurement of steering in real vLLM inference. These produce the headline numbers for the article.
 
+### Phase C migration status
+
+`bench_latency.py`, `bench_throughput.py`, and `bench_memory.py` were modernized in Phase C:
+
+- No `sys.path.insert` hack — they rely on the installed `steering_bench` package.
+- Model dims come from `steering_bench.harness.models.get_model_config` (single source of truth; the per-script `MODEL_CONFIGS` tables were removed). Known models resolve offline to identical dims; unknown models resolve via HF `AutoConfig` or raise a clear `ModelConfigError` (the old silent gemma-dims fallback is gone).
+- Each takes `--engine` (choices from the engine registry). Because these scripts exercise vLLM-fork-only behavior — `named_shared`/`inline_unique` modes, `register_steering_modules` collective RPC, `enable_prefix_caching`, per-request `max_steering_configs`, `num_gpu_blocks_override` — they are **guarded to `--engine vllm`** and exit with a clear error for any other engine (strategy (b): fork-specific path kept intact rather than deleting capability). Generation therefore still goes through the direct vLLM `LLM`/`SamplingParams` API, not the `SteeringEngine.generate` seam.
+- Results are stamped with the first-class `engine` block via `write_result(engine=VllmSteeringEngine().identity())`.
+
+The **engine-agnostic** slice of the latency measurement (single/batched steered latency at one layer/hook) is available through the harness: `python -m steering_bench run latency --engine <engine>`.
+
 ### In Scope
 - Per-request latency: steering off/idle/per_request at various batch sizes
 - Batch throughput: tokens/sec with varying distinct steering config counts

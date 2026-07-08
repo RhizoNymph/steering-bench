@@ -88,6 +88,12 @@ def to_dataframe(records: list[dict]) -> pd.DataFrame:
         row["env_hostname"] = env.get("hostname", "unknown")
         row["env_vllm_version"] = env.get("vllm_version", "unknown")
 
+        # First-class engine identity (records predating the block get None).
+        engine = rec.get("engine") or {}
+        row["engine_name"] = engine.get("name")
+        row["engine_version"] = engine.get("version")
+        row["engine_commit"] = engine.get("commit")
+
         # Flatten parameters
         params = rec.get("parameters", {})
         row.update(_flatten_dict(params, "param"))

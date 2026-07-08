@@ -9,22 +9,13 @@ from __future__ import annotations
 
 import argparse
 import gc
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-    "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
-}
 
 
 def theoretical_memory_bytes(
@@ -176,10 +167,26 @@ def main():
              "headroom for the measurement.",
     )
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. This benchmark measures vLLM-fork steering "
+             "buffers and only supports --engine vllm.",
+    )
     args = parser.parse_args()
 
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this benchmark measures "
+            "vLLM-fork steering-buffer memory (max_steering_configs, "
+            "num_gpu_blocks_override) which has no engine-agnostic equivalent. "
+            "Use --engine vllm."
+        )
+
     config_counts = [int(x) for x in args.configs_sweep.split(",")]
-    model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
+    model_config = get_model_config(args.model)
+    engine_identity = VllmSteeringEngine().identity()
 
     # Capture empty-GPU baseline (before any model is loaded)
     gc.collect()
@@ -188,7 +195,7 @@ def main():
 
     print(f"Memory benchmark: {args.model}")
     print(f"Config counts: {config_counts}")
-    print(f"hidden_size={model_config['hidden_size']}, num_layers={model_config['num_layers']}")
+    print(f"hidden_size={model_config.hidden_size}, num_layers={model_config.num_layers}")
     print(f"Empty-GPU baseline: {empty_gpu_mb:.1f} MB (other processes on device)")
     print(f"Fixed KV blocks: {args.num_gpu_blocks}, gpu_util: {args.gpu_memory_utilization}")
     print()
@@ -252,8 +259,8 @@ def main():
         # Theoretical
         if max_configs > 0:
             theory = theoretical_memory_bytes(
-                num_layers=model_config["num_layers"],
-                hidden_size=model_config["hidden_size"],
+                num_layers=model_config.num_layers,
+                hidden_size=model_config.hidden_size,
                 max_steering_configs=max_configs,
             )
             print(f"  theoretical: {theory['total_mb']:.1f} MB")
@@ -281,6 +288,7 @@ def main():
             results=results,
             output_dir=args.output_dir,
             tag=args.tag,
+            engine=engine_identity,
         )
         all_results.append({
             "max_configs": max_configs,

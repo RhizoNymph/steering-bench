@@ -4,6 +4,13 @@
 Runs Tier 1 (single-request) and Tier 2 (batched N=16) benchmarks
 across all installed steering libraries. Discovers available libraries
 at runtime and skips those not installed.
+
+This script drives the ``external/`` per-library adapters, which cover more
+libraries (hf_baseline, transformerlens, nnsight, repeng, pyvene, vllm_single,
+vllm_batched) than the engine registry. Its engine-seam-native successor —
+which runs the same single-request workload across registered
+:class:`~steering_bench.engine.base.SteeringEngine` adapters — is available as
+``python -m steering_bench run external-comparison``.
 """
 
 from __future__ import annotations
@@ -12,24 +19,14 @@ import argparse
 import gc
 import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
 from steering_bench.external.base import cleanup_gpu, is_library_available
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import random_steering_vectors
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-    "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
-}
 
 # Library name -> (import check, class import path)
 LIBRARY_REGISTRY: list[tuple[str, str | None, str, str]] = [
@@ -183,9 +180,9 @@ def main():
     parser.add_argument("--tag", default="")
     args = parser.parse_args()
 
-    model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2048, "num_layers": 16})
-    hidden_size = model_config["hidden_size"]
-    num_layers = model_config["num_layers"]
+    model_config = get_model_config(args.model)
+    hidden_size = model_config.hidden_size
+    num_layers = model_config.num_layers
 
     # Generate steering vector for the target layer
     all_vectors = random_steering_vectors(
@@ -267,6 +264,7 @@ def main():
                     output_dir=args.output_dir,
                     tag=args.tag,
                     raw_samples_ms=lat.get("samples_ms"),
+                    engine={"name": name, "version": None, "commit": None},
                 )
                 tier1_results.append({"name": name, **results_out})
 
@@ -318,6 +316,7 @@ def main():
                     output_dir=args.output_dir,
                     tag=args.tag,
                     raw_samples_ms=lat.get("samples_ms"),
+                    engine={"name": name, "version": None, "commit": None},
                 )
                 tier2_results.append({"name": name, **results_out})
 
