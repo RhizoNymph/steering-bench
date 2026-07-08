@@ -21,7 +21,7 @@ from typing import Any, ClassVar
 
 import torch
 
-from steering_bench.engine.base import SteeringEngine
+from steering_bench.engine.base import SteeringConfig, SteeringEngine
 from steering_bench.engine.spec import GenerationRequest
 from steering_bench.output import print_result_summary, write_result
 from steering_bench.timing import TimingStats, compute_stats
@@ -100,6 +100,16 @@ class Benchmark(abc.ABC):
         """Engine-specific ``load`` options. Default: none."""
         return {}
 
+    def steering_config(self) -> SteeringConfig | None:
+        """Typed load-time steering config. Default: ``None`` (engine default)."""
+        return None
+
+    def after_load(self) -> None:
+        """Hook run once after ``load`` and before warmup. Default: no-op.
+
+        Used by mode benchmarks to register named steering modules.
+        """
+
     def extra_results(
         self, stats: TimingStats, avg_output_tokens: float, num_requests: int
     ) -> dict[str, Any]:
@@ -113,8 +123,16 @@ class Benchmark(abc.ABC):
         requests = self.build_requests()
         num_requests = len(requests)
 
-        self.engine.load(self.config.model, **self.load_opts())
+        steering_config = self.steering_config()
+        load_opts = self.load_opts()
+        if steering_config is not None:
+            self.engine.load(
+                self.config.model, steering_config=steering_config, **load_opts
+            )
+        else:
+            self.engine.load(self.config.model, **load_opts)
         try:
+            self.after_load()
             memory_mb = self.engine.memory_allocated_mb()
 
             for _ in range(self.config.warmup):

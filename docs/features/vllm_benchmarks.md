@@ -15,6 +15,15 @@ End-to-end overhead measurement of steering in real vLLM inference. These produc
 
 The **engine-agnostic** slice of the latency measurement (single/batched steered latency at one layer/hook) is available through the harness: `python -m steering_bench run latency --engine <engine>`.
 
+### Phase 3: engine-agnostic modes now first-class in the harness
+
+The offline steering **modes** these scripts pioneered (`disabled`, `enabled_idle`, `inline_shared`, `inline_unique`, `named_shared`, `per_request_N`) are now expressed engine-agnostically over the seam (`src/steering_bench/harness/benchmarks/modes.py`) and driven by two harness benchmarks:
+
+- `python -m steering_bench run latency --mode <mode> --engine <engine>` — per-iteration steered latency.
+- `python -m steering_bench run throughput --mode <mode> --engine <engine>` — tokens/sec (input+output).
+
+`named_shared` uses `engine.register_module` + `NamedModuleRef`, load-time knobs go through the typed `SteeringConfig` (`enable_steering`/`max_steering_configs`/`enable_prefix_caching`), and on engines lacking `named_modules` the `named_shared` mode degrades to inline-shared. `scripts/bench_latency.py`/`bench_throughput.py` are **retained** (not deleted in Phase 3) because they still carry fork-specific nuances the seam doesn't express yet — prefix-cache isolation (`--disable-prefix-cache` sweeps as a first-class axis), auto-promote steady-state semantics, per-mode `max_steering_configs` overrides, and the internal mode×batch matrix loop. Full script retirement / mechanical migration is Phase 7.
+
 ### In Scope
 - Per-request latency: steering off/idle/per_request at various batch sizes
 - Batch throughput: tokens/sec with varying distinct steering config counts

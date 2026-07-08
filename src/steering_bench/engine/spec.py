@@ -17,6 +17,7 @@ All validation happens in ``__post_init__`` and raises ``SteeringSpecError``
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -134,13 +135,27 @@ class SteeringSpec:
 
 @dataclass(frozen=True)
 class NamedModuleRef:
-    """Reference to a pre-registered named steering module."""
+    """Reference to a pre-registered named steering module.
+
+    ``scale`` is the per-reference multiplier applied to the registered
+    module's vectors at request time.  It defaults to ``1.0`` (apply the
+    module as registered).  Adapters that support named modules encode the
+    reference as a ``(name, scale)`` pair (the vLLM fork's
+    ``SamplingParams.steering_module_ref`` format).
+    """
 
     name: str
+    scale: float = 1.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
             raise SteeringSpecError("NamedModuleRef.name must be a non-empty str")
+        scale = float(self.scale)
+        if not math.isfinite(scale):
+            raise SteeringSpecError(
+                f"NamedModuleRef.scale must be finite, got {self.scale!r}"
+            )
+        object.__setattr__(self, "scale", scale)
 
 
 # What an engine is asked to apply for a request: an inline spec, a named

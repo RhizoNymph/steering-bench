@@ -21,7 +21,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from steering_bench.engine.base import Capabilities, EngineError, SteeringEngine
+from steering_bench.engine.base import (
+    Capabilities,
+    EngineError,
+    SteeringConfig,
+    SteeringEngine,
+)
 from steering_bench.engine.spec import (
     GenerationRequest,
     GenerationResult,
@@ -92,7 +97,15 @@ class RepengSteeringEngine(SteeringEngine):
         self._cached_key: SpecKey | None = None
         self._num_layers: int = 0
 
-    def load(self, model_id: str, **opts: object) -> None:
+    def load(
+        self,
+        model_id: str,
+        *,
+        steering_config: SteeringConfig | None = None,
+        **opts: object,
+    ) -> None:
+        # No fork-specific steering knobs; steering_config is ignored (no-op).
+        del steering_config
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
