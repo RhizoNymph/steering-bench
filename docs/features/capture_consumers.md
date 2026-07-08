@@ -54,7 +54,7 @@ delivers them to external consumers (filesystem writers, RL trainers, dashboards
 
 ---
 
-### `scripts/bench_capture_manager.py`
+### `scripts/vllm_internal/bench_capture_manager.py`
 
 **Question answered:** Which part of the manager hot path is expensive?
 
@@ -120,7 +120,7 @@ delivers them to external consumers (filesystem writers, RL trainers, dashboards
 
 ---
 
-### `scripts/bench_capture_latency.py`
+### `scripts/vllm_internal/bench_capture_latency.py`
 
 **Question answered:** For an online plugin, how long between the capture system
 having an activation and my consumer's callback firing?
@@ -167,7 +167,7 @@ Sweep: `location × batch_size × num_layers × position_type`.
 
 ---
 
-### `scripts/bench_capture_plugin_work.py`
+### `scripts/vllm_internal/bench_capture_plugin_work.py`
 
 **Question answered:** How much CPU can my plugin spend per chunk
 before it starts hurting throughput?
@@ -210,7 +210,7 @@ consumer, you can spend up to N μs per chunk before throughput drops
 
 ---
 
-### `scripts/bench_capture_manager.py --hook-sets ...`
+### `scripts/vllm_internal/bench_capture_manager.py --hook-sets ...`
 
 The existing manager microbenchmark gained a `--hook-sets` flag for
 multi-hook capture.  Pass a semicolon-separated list of
@@ -272,22 +272,22 @@ VLLM_PY=/home/nymph/Code/vllm/capture-consumers/.venv/bin/python
 $VLLM_PY scripts/bench_capture_filesystem.py --bench-dir ~/bench_writer_tmp
 
 # Storage path (~2 min, requires GPU, no model load)
-$VLLM_PY scripts/bench_capture_manager.py
+$VLLM_PY scripts/vllm_internal/bench_capture_manager.py
 
 # Multi-hook sweep (~5 min)
-$VLLM_PY scripts/bench_capture_manager.py \
+$VLLM_PY scripts/vllm_internal/bench_capture_manager.py \
   --hook-sets "post_mlp;post_mlp,post_attn;post_mlp,post_attn,pre_mlp,pre_attn"
 
 # E2E overhead across consumer configs (~10-15 min, loads model 6 times)
 $VLLM_PY scripts/bench_capture_e2e.py
 
 # Observation-path latency
-$VLLM_PY scripts/bench_capture_latency.py --mode microbench     # ~2 min
-$VLLM_PY scripts/bench_capture_latency.py --mode e2e            # ~15 min
+$VLLM_PY scripts/vllm_internal/bench_capture_latency.py --mode microbench     # ~2 min
+$VLLM_PY scripts/vllm_internal/bench_capture_latency.py --mode e2e            # ~15 min
 
 # Plugin work budget
-$VLLM_PY scripts/bench_capture_plugin_work.py --mode microbench # ~3 min
-$VLLM_PY scripts/bench_capture_plugin_work.py --mode e2e        # ~20 min
+$VLLM_PY scripts/vllm_internal/bench_capture_plugin_work.py --mode microbench # ~3 min
+$VLLM_PY scripts/vllm_internal/bench_capture_plugin_work.py --mode e2e        # ~20 min
 
 # Quick smoke test: baseline + logging_minimal, batch=1 only
 $VLLM_PY scripts/bench_capture_e2e.py \

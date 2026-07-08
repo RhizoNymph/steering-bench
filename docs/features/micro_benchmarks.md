@@ -49,9 +49,9 @@ Create steering_index tensor on GPU
 
 | File | Purpose |
 |------|---------|
-| `scripts/bench_steering_op.py` | Kernel latency sweep |
-| `scripts/bench_steering_manager.py` | Manager method overhead |
-| `scripts/bench_index_building.py` | Index construction loop |
+| `scripts/vllm_internal/bench_steering_op.py` | Kernel latency sweep |
+| `scripts/vllm_internal/bench_steering_manager.py` | Manager method overhead |
+| `scripts/vllm_internal/bench_index_building.py` | Index construction loop |
 
 ## Invariants
 
