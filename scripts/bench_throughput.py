@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import argparse
 import gc
-import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import (
@@ -40,14 +39,6 @@ def _vectors_to_named_payload(vectors: dict) -> dict:
                 entry = entry.tolist()
             coerced[hook][layer_idx] = entry
     return {"vectors": coerced}
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-    "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
-}
 
 
 def make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
@@ -327,7 +318,21 @@ def main():
         help="Disable vLLM prefix caching (to isolate its effect on throughput).",
     )
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. These modes are vLLM-fork-specific; only "
+             "--engine vllm is supported.",
+    )
     args = parser.parse_args()
+
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this script exercises "
+            "vLLM-fork steering modes with no engine-agnostic equivalent. Use "
+            "--engine vllm."
+        )
 
     if args.modes and args.configs_sweep:
         parser.error("Pass exactly one of --modes / --configs-sweep")
@@ -348,7 +353,8 @@ def main():
             "named_shared",
             "per_request_4",
         ]
-    config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
+    model_config = get_model_config(args.model)
+    engine_identity = VllmSteeringEngine().identity()
 
     print(f"Throughput benchmark: {args.model}")
     print(f"Prompts: {args.num_prompts}, prompt_len: {args.prompt_len}, max_tokens: {args.max_tokens}")
@@ -370,8 +376,8 @@ def main():
                 mode=mode,
                 warmup=args.warmup,
                 iters=args.iters,
-                hidden_size=config["hidden_size"],
-                num_layers=config["num_layers"],
+                hidden_size=model_config.hidden_size,
+                num_layers=model_config.num_layers,
                 max_steering_configs_override=args.max_steering_configs,
                 enable_prefix_caching=not args.disable_prefix_cache,
                 num_hooks=args.num_hooks,
@@ -408,7 +414,7 @@ def main():
             "num_layers_steered": (
                 args.num_layers_steered
                 if args.num_layers_steered is not None
-                else config["num_layers"]
+                else model_config.num_layers
             ),
         }
         results_out = {k: v for k, v in result.items() if k != "samples_ms"}
@@ -422,6 +428,7 @@ def main():
             output_dir=args.output_dir,
             tag=args.tag,
             raw_samples_ms=result.get("samples_ms"),
+            engine=engine_identity,
         )
         all_results.append({
             "mode": mode,

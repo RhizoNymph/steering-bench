@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import datetime
 import json
-import os
 import platform
 import subprocess
 from pathlib import Path
@@ -81,6 +80,7 @@ def write_result(
     output_dir: str | Path,
     tag: str = "",
     raw_samples_ms: list[float] | None = None,
+    engine: dict[str, Any] | None = None,
 ) -> Path:
     """Write a benchmark result to a JSON file.
 
@@ -91,6 +91,11 @@ def write_result(
         output_dir: Directory to write the JSON file.
         tag: Optional tag for this run.
         raw_samples_ms: Optional raw timing samples.
+        engine: Optional first-class engine identity block. When provided it is
+            stored as a top-level ``engine`` key, canonically
+            ``{"name": ..., "version": ..., "commit": ...}``. This is the
+            cross-engine identifier; ``environment.vllm_version`` /
+            ``environment.vllm_commit`` remain for backward compatibility.
 
     Returns:
         Path to the written JSON file.
@@ -101,7 +106,7 @@ def write_result(
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     safe_name = benchmark.replace(".", "_").replace("/", "_")
 
-    record = {
+    record: dict[str, Any] = {
         "benchmark": benchmark,
         "timestamp": timestamp,
         "tag": tag,
@@ -109,6 +114,8 @@ def write_result(
         "parameters": parameters,
         "results": results,
     }
+    if engine is not None:
+        record["engine"] = engine
     if raw_samples_ms is not None:
         record["raw_samples_ms"] = raw_samples_ms
 

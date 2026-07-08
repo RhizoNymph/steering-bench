@@ -14,6 +14,18 @@ Compare vLLM steering against TransformerLens, nnsight, repeng, and pyvene.
 - Semantic quality of steering (only performance)
 - Libraries not listed above
 
+### Phase C migration status
+
+`scripts/bench_external.py` was modernized (no `sys.path` hack; model dims from `steering_bench.harness.models.get_model_config`; each `write_result` stamps an `engine` block whose `name` is the library, e.g. `nnsight`/`vllm_batched`). It **intentionally keeps** the `external/` per-library adapter set, which covers more libraries (hf_baseline, transformerlens, nnsight, repeng, pyvene, vllm_single, vllm_batched) than the two-entry engine registry — so it is *not* forced onto the `SteeringEngine` seam.
+
+The engine-seam-native successor, which runs the same single-request steered workload across every registered `SteeringEngine` and tabulates the comparison, is the `external-comparison` harness benchmark:
+
+```
+python -m steering_bench run external-comparison
+```
+
+(defined in `src/steering_bench/harness/benchmarks/external_comparison.py`).
+
 ## Data/Control Flow
 
 ```

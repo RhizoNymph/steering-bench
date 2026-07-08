@@ -166,6 +166,7 @@ class Benchmark(abc.ABC):
             output_dir=self.config.output_dir,
             tag=self.config.tag,
             raw_samples_ms=stats.samples_ms,
+            engine=self.engine.identity(),
         )
         print_result_summary(self.benchmark_name, results_block)
 

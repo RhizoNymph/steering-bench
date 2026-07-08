@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import argparse
 import gc
-import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import (
@@ -29,16 +28,6 @@ from steering_bench.vectors import (
 # the worker registers this once and every request references it via
 # steering_module_ref.
 NAMED_BENCH_MODULE = "bench_named_shared"
-
-# Model constants (Gemma-3-4B-IT)
-MODEL_CONFIGS = {
-    "Qwen/Qwen3-0.6B": {"hidden_size": 1024, "num_layers": 28},
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-    "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
-}
 
 
 def make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
@@ -304,18 +293,33 @@ def main():
              "steering_bench.vectors.even_layer_subset.",
     )
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. These modes (named_shared, inline_unique, "
+             "prefix caching, per-request max_steering_configs) are "
+             "vLLM-fork-specific; only --engine vllm is supported. For an "
+             "engine-agnostic steered-latency sweep use "
+             "`python -m steering_bench run latency --engine <engine>`.",
+    )
     args = parser.parse_args()
+
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this script exercises "
+            "vLLM-fork steering modes with no engine-agnostic equivalent. Use "
+            "--engine vllm, or `python -m steering_bench run latency` for the "
+            "portable subset."
+        )
 
     batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
 
-    config = MODEL_CONFIGS.get(args.model)
-    if config is None:
-        print(f"Warning: unknown model {args.model}, using default hidden_size=2560, num_layers=34")
-        config = {"hidden_size": 2560, "num_layers": 34}
-
-    hidden_size = config["hidden_size"]
-    num_layers = config["num_layers"]
+    model_config = get_model_config(args.model)
+    hidden_size = model_config.hidden_size
+    num_layers = model_config.num_layers
+    engine_identity = VllmSteeringEngine().identity()
 
     total = len(modes) * len(batch_sizes)
     print(f"Latency benchmark: {args.model}")
@@ -395,6 +399,7 @@ def main():
                 output_dir=args.output_dir,
                 tag=args.tag,
                 raw_samples_ms=result.get("samples_ms"),
+                engine=engine_identity,
             )
             all_results.append({
                 "mode": mode,

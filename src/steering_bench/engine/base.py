@@ -84,6 +84,14 @@ class SteeringEngine(abc.ABC):
         """Commit hash of the underlying engine, if available."""
         return None
 
+    def identity(self) -> dict[str, str | None]:
+        """First-class engine identity block for the result schema.
+
+        Canonical cross-engine identifier written to a result's top-level
+        ``engine`` key via :func:`steering_bench.output.write_result`.
+        """
+        return {"name": self.name, "version": self.version(), "commit": self.commit()}
+
     # -- shared GPU helpers (reused from external.base) ----------------------
 
     @staticmethod

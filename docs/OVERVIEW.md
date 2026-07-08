@@ -26,7 +26,7 @@ Completely external to the vLLM codebase — vLLM is an optional dependency.
     → prints human-readable summary
 ```
 
-All results share a common JSON schema with environment metadata, parameters, and timing statistics.
+All results share a common JSON schema with environment metadata, parameters, and timing statistics. Records also carry a first-class, cross-engine `engine` block (`{name, version, commit}`) written via `output.write_result(engine=...)`; `analysis/aggregate.py` surfaces it as `engine_name` / `engine_version` / `engine_commit` columns. The legacy `environment.vllm_version` / `environment.vllm_commit` fields remain for backward compatibility, but `engine` is the canonical identifier for grouping/comparing results across engines. Records predating the block load fine (columns are `None`).
 
 ## Features Index
 
@@ -43,9 +43,9 @@ All results share a common JSON schema with environment metadata, parameters, an
 - doc: docs/features/micro_benchmarks.md
 
 ### vllm_benchmarks
-- description: End-to-end vLLM system benchmarks (latency, throughput, memory)
+- description: End-to-end vLLM system benchmarks (latency, throughput, memory). As of Phase C the three headline scripts drop the `sys.path` hack, resolve model dims via `harness.models.get_model_config`, take `--engine` (guarded to `vllm` since the modes are fork-specific), and stamp results with the first-class `engine` block. The engine-agnostic subset runs via `python -m steering_bench run latency`.
 - entry_points: [scripts/bench_latency.py, scripts/bench_throughput.py, scripts/bench_memory.py, scripts/bench_steering_with_capture.py]
-- depends_on: [core]
+- depends_on: [core, engine_abstraction, harness]
 - doc: docs/features/vllm_benchmarks.md
 
 ### steering_modes_matrix
@@ -61,9 +61,9 @@ All results share a common JSON schema with environment metadata, parameters, an
 - doc: docs/features/ablation_benchmarks.md
 
 ### external_comparison
-- description: Cross-library steering performance comparison (TransformerLens, nnsight, repeng, pyvene vs vLLM)
-- entry_points: [scripts/bench_external.py]
-- depends_on: [core]
+- description: Cross-library steering performance comparison (TransformerLens, nnsight, repeng, pyvene vs vLLM). `scripts/bench_external.py` keeps the broader per-library `external/` adapter set (dims now from `harness.models`, each result stamped with an `engine` block = library name). Its engine-seam-native successor is the `external-comparison` harness benchmark: `python -m steering_bench run external-comparison`.
+- entry_points: [scripts/bench_external.py, src/steering_bench/harness/benchmarks/external_comparison.py]
+- depends_on: [core, engine_abstraction, harness]
 - doc: docs/features/external_comparison.md
 
 ### engine_abstraction
