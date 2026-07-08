@@ -72,6 +72,12 @@ All results share a common JSON schema with environment metadata, parameters, an
 - depends_on: [core]
 - doc: docs/features/engine_abstraction.md
 
+### harness
+- description: Benchmark harness built on the engine seam — a single `get_model_config` (static table + HuggingFace AutoConfig fallback) for model dims, shared `add_common_args` argparse flags, a `Benchmark` base class owning the warmup->measure->write->print lifecycle, and a `steering-bench` CLI (`run <benchmark> --engine <engine>`, `list`, `engines`) with a benchmark registry. Two proof benchmarks (`latency`, `external-comparison`) run engine-agnostically. Additive; migrating the old `scripts/*.py` onto the harness is Phase C.
+- entry_points: [src/steering_bench/harness/models.py, src/steering_bench/harness/args.py, src/steering_bench/harness/benchmark.py, src/steering_bench/harness/benchmarks/registry.py, src/steering_bench/__main__.py]
+- depends_on: [core, engine_abstraction]
+- doc: docs/features/harness.md
+
 ### analysis
 - description: Result aggregation and matplotlib chart generation
 - entry_points: [scripts/analyze.py]
