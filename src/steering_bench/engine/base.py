@@ -5,21 +5,49 @@ the registry can filter engines to those able to serve a given benchmark, and
 implements a tiny lifecycle: ``load`` -> ``generate`` -> ``teardown`` plus
 memory and identity introspection.
 
-GPU helpers are reused from the existing ``external`` package rather than
-duplicated, so behavior stays consistent with the legacy adapters.
+GPU / package helpers used by every adapter live here as the single source of
+truth (they were previously in the retired ``external.base`` module).
 """
 
 from __future__ import annotations
 
 import abc
+import importlib.util
 from dataclasses import dataclass, fields
 
 from steering_bench.engine.spec import GenerationRequest, GenerationResult
-from steering_bench.external.base import cleanup_gpu, gpu_memory_mb
 
 
 class EngineError(RuntimeError):
     """Raised when an engine is asked to do something it cannot support."""
+
+
+# -- shared GPU / package helpers (single definition, formerly external.base) --
+
+
+def gpu_memory_mb() -> float:
+    """Current GPU memory allocated in MB (0.0 on CPU-only hosts)."""
+    import torch
+
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / (1024 * 1024)
+    return 0.0
+
+
+def cleanup_gpu() -> None:
+    """Force GPU memory cleanup between benchmarks."""
+    import gc
+
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def is_library_available(name: str) -> bool:
+    """Whether a Python package is importable."""
+    return importlib.util.find_spec(name) is not None
 
 
 @dataclass(frozen=True)
@@ -92,7 +120,7 @@ class SteeringEngine(abc.ABC):
         """
         return {"name": self.name, "version": self.version(), "commit": self.commit()}
 
-    # -- shared GPU helpers (reused from external.base) ----------------------
+    # -- shared GPU helpers (module-level functions above) -------------------
 
     @staticmethod
     def _gpu_memory_mb() -> float:

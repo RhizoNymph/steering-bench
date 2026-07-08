@@ -169,10 +169,17 @@ class GenerationResult:
 
     Minimal by design; ``text`` is optional so latency/throughput benchmarks
     need not materialize decoded strings.
+
+    ``output_tokens_exact`` records whether ``output_tokens`` is an exact,
+    per-request count.  It defaults to ``True`` (engines that count honestly).
+    An engine whose batch path cannot recover per-prompt output lengths -- e.g.
+    nnsight's pseudo-batch, which reports the ``max_tokens`` placeholder -- sets
+    it ``False`` so downstream consumers do not treat the figure as precise.
     """
 
     output_tokens: int
     text: str | None = None
+    output_tokens_exact: bool = True
 
     def __post_init__(self) -> None:
         if self.output_tokens < 0:

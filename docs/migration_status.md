@@ -20,7 +20,7 @@ Status legend: **migrated** (all four applied), **partial** (some applied),
 | `bench_latency.py` | migrated | Dims from `harness.models`; no `sys.path`; `--engine` guarded to `vllm` (fork-only modes: `named_shared`, `inline_unique`, prefix caching, per-request `max_steering_configs`); `engine` block stamped. Engine-agnostic subset: `run latency`. |
 | `bench_throughput.py` | migrated | Same treatment as `bench_latency.py`; `--engine` guarded to `vllm`. |
 | `bench_memory.py` | migrated | Dims from `harness.models`; no `sys.path`; `--engine` guarded to `vllm` (measures fork steering buffers via `num_gpu_blocks_override` — no generation, no seam equivalent); `engine` block stamped. |
-| `bench_external.py` | partial | Dims from `harness.models`; no `sys.path`; per-result `engine` block = library name. Intentionally keeps the broader `external/` per-library adapter set instead of the 2-engine registry. Seam-native successor already exists: `run external-comparison`. Does not take `--engine` (it iterates `--libraries`). |
+| `bench_external.py` | replaced (Phase 2) | Now a thin **deprecation shim** forwarding old flags to `python -m steering_bench run external-comparison`. The per-library `external/` adapters (hf_baseline, transformerlens, nnsight, repeng, pyvene, vllm_single/batched) and the `external/base.py::SteeringBenchmark` protocol were retired; each library is now a `SteeringEngine` adapter under `engine/engines/`. `external-comparison` covers both tiers via `--batch-size`. |
 
 ## Remaining scripts (documented follow-up)
 

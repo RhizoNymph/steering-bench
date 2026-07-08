@@ -39,7 +39,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from steering_bench.external.base import is_library_available
+from steering_bench.engine.base import is_library_available
 from steering_bench.output import write_result
 
 _FILLER = (

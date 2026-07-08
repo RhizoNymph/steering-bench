@@ -46,7 +46,7 @@ caller (future harness / bench script)
      requests = [GenerationRequest(prompt, max_tokens, steering=SteeringSpec|NamedModuleRef|None)]
      results  = engine.generate(requests)         # -> list[GenerationResult]
      engine.memory_allocated_mb()
-     engine.teardown()                            # frees GPU via external.base.cleanup_gpu
+     engine.teardown()                            # frees GPU via engine.base.cleanup_gpu
 ```
 
 `SteeringSpec` is built from the `{hook:{layer:[floats]}}` dict that
@@ -61,19 +61,41 @@ into its native form inside `generate`:
 - TransformerLens: `_resolve_single(spec)` enforces single-hook/single-layer,
   `_hook_name(hook, layer)` maps to `blocks.{layer}.{suffix}`, and an additive
   forward hook adds the vector each forward pass.
+- HF baseline (`hf`): the no-op floor — real padded batching, steering accepted
+  and **ignored**. Token counts are exact.
+- nnsight: `resolve_single(spec)` + `layer_path(layer)` → residual add at
+  `model.layers.{layer}.output[0]`. Single request → exact count; the pseudo-batch
+  path (`batch_placeholder_results`) cannot recover per-prompt lengths, so it
+  reports `max_tokens` and sets `output_tokens_exact=False`.
+- repeng: `resolve_single` + `control_layers_for(layer, num_layers)` (a ~5-layer
+  band) → `ControlModel` + `set_control`. The control object is built lazily and
+  **cached keyed on the `SteeringSpec`** via `spec_cache_key(spec)` (a hashable
+  content key); it is rebuilt only when the spec changes.
+- pyvene: `resolve_single` + `component_for(hook)` (`pre_attn→block_input`,
+  `post_attn`/`post_mlp→block_output`) → `IntervenableModel` + `AdditionIntervention`.
+  The intervenable is likewise cached on the `SteeringSpec` (`spec_cache_key`) and
+  rebuilt only on change.
+
+`spec_to_native`, `resolve_single`, `spec_cache_key`, `control_layers_for`,
+`component_for`, `layer_path`, and `batch_placeholder_results` are all pure,
+heavy-lib-free module functions, so each adapter's translation / cache-key /
+hook-mapping logic is unit-testable with nothing installed.
 
 ## Related Files
 
 | File | Role | Key exports |
 |------|------|-------------|
-| `src/steering_bench/engine/spec.py` | Typed domain model + validation | `SteeringSpec` (`from_vector_dict`, `single`, `hooks`, `layers`, `dim`, `is_multi_hook`, `is_multi_layer`, `is_single_hook_single_layer`, `to_vector_dict`), `NamedModuleRef`, `GenerationRequest`, `GenerationResult`, `Steering`, `SteeringSpecError` |
-| `src/steering_bench/engine/base.py` | Engine ABC + capability descriptor | `Capabilities` (+`satisfies`), `SteeringEngine` (`load`/`generate`/`memory_allocated_mb`/`teardown`/`version`/`commit`), `EngineError` |
-| `src/steering_bench/engine/registry.py` | Data-driven, capability-aware discovery | `EngineEntry`, `ENGINE_REGISTRY`, `discover`, `is_package_available` |
+| `src/steering_bench/engine/spec.py` | Typed domain model + validation | `SteeringSpec` (`from_vector_dict`, `single`, `hooks`, `layers`, `dim`, `is_multi_hook`, `is_multi_layer`, `is_single_hook_single_layer`, `to_vector_dict`), `NamedModuleRef`, `GenerationRequest`, `GenerationResult` (+`output_tokens_exact`), `Steering`, `SteeringSpecError` |
+| `src/steering_bench/engine/base.py` | Engine ABC + capability descriptor + GPU helpers | `Capabilities` (+`satisfies`), `SteeringEngine`, `EngineError`, `gpu_memory_mb`, `cleanup_gpu`, `is_library_available` (single definition; formerly `external.base`) |
+| `src/steering_bench/engine/registry.py` | Data-driven, capability-aware discovery | `EngineEntry`, `ENGINE_REGISTRY` (6 engines), `discover`, `is_package_available` |
 | `src/steering_bench/engine/engines/vllm.py` | vLLM adapter + pure translation | `VllmSteeringEngine`, `spec_to_native`, `named_ref_to_kwargs`, `steering_kwargs` |
 | `src/steering_bench/engine/engines/transformerlens.py` | TransformerLens adapter | `TransformerLensSteeringEngine`, `_resolve_single`, `_hook_name` |
+| `src/steering_bench/engine/engines/hf.py` | HF no-op baseline adapter | `HFSteeringEngine` |
+| `src/steering_bench/engine/engines/nnsight.py` | nnsight adapter | `NnsightSteeringEngine`, `resolve_single`, `layer_path`, `batch_placeholder_results` |
+| `src/steering_bench/engine/engines/repeng.py` | repeng adapter (spec-keyed control cache) | `RepengSteeringEngine`, `spec_cache_key`, `control_layers_for`, `resolve_single` |
+| `src/steering_bench/engine/engines/pyvene.py` | pyvene adapter (spec-keyed intervenable cache) | `PyveneSteeringEngine`, `spec_cache_key`, `component_for`, `resolve_single` |
 | `src/steering_bench/engine/__init__.py`, `.../engines/__init__.py` | Re-exports | (public surface above) |
-| `src/steering_bench/external/base.py` | Reused GPU helpers | `gpu_memory_mb`, `cleanup_gpu` (imported, not duplicated) |
-| `tests/test_engine_spec.py`, `test_engine_registry.py`, `test_vllm_translate.py` | Unit tests (no GPU/backends) | — |
+| `tests/test_engine_spec.py`, `test_engine_registry.py`, `test_vllm_translate.py`, `test_engine_hf.py`, `test_engine_nnsight.py`, `test_engine_repeng.py`, `test_engine_pyvene.py`, `test_generation_result.py` | Unit tests (no GPU/backends) | — |
 
 ## Invariants / Constraints
 
@@ -82,6 +104,14 @@ into its native form inside `generate`:
   length; violations raise `SteeringSpecError` (a `ValueError`). Specs are
   frozen and inner vectors are normalized to `tuple[float, ...]`.
 - **`GenerationRequest.max_tokens > 0`**; `GenerationResult.output_tokens >= 0`.
+- **`GenerationResult.output_tokens_exact`** defaults `True` (honest per-request
+  count). An engine whose batch path cannot recover per-prompt lengths sets it
+  `False` (nnsight's pseudo-batch) rather than reporting `max_tokens` as if exact.
+- **Load-time-steering caching (repeng/pyvene).** The control/intervention object
+  is built lazily on first `generate` and cached keyed on the `SteeringSpec`
+  content (`spec_cache_key`); it is rebuilt only when the spec differs. A
+  shared-vector workload pays the build once; a changing-vector workload
+  legitimately incurs and measures the re-parameterization cost.
 - **`Capabilities.satisfies(required)`**: an engine satisfies a requirement iff
   it provides every capability the requirement demands; a required field of
   `False` means "don't care".
@@ -93,6 +123,8 @@ into its native form inside `generate`:
 - **vLLM load defaults** match the legacy adapters: `enable_steering=True`,
   `max_steering_configs=4`, `gpu_memory_utilization=0.9`, `max_model_len=2048`
   (overridable via `load(**opts)`).
-- **Additive.** No existing module is modified except the one-line
-  `output.py` except-clause bug fix; the `external/` package and
-  `bench_external.py` remain the live path until Phase B/C migrate them.
+- **Phase 2 retirement.** The old `external/base.py::SteeringBenchmark` protocol
+  and its per-library adapters were deleted; every steering library is now a
+  `SteeringEngine` adapter here, and `scripts/bench_external.py` is a shim to
+  `run external-comparison`. Only the patch-sweep modules (`external/tl_patching.py`,
+  `external/vllm_patch_sweep.py`) remain under `external/` (Phase 6).

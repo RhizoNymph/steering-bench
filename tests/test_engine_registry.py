@@ -50,18 +50,45 @@ def test_satisfies_matrix() -> None:
             assert prov.satisfies(req) is expected
 
 
+_ALL_ENGINES = {"vllm", "transformerlens", "hf_baseline", "nnsight", "repeng", "pyvene"}
+
+
 def test_registry_contains_known_engines() -> None:
     names = {e.name for e in reg.ENGINE_REGISTRY}
-    assert {"vllm", "transformerlens"} <= names
+    assert _ALL_ENGINES <= names
+
+
+def test_registry_required_packages() -> None:
+    by_name = {e.name: e for e in reg.ENGINE_REGISTRY}
+    assert by_name["hf_baseline"].required_package == "transformers"
+    assert by_name["nnsight"].required_package == "nnsight"
+    assert by_name["repeng"].required_package == "repeng"
+    assert by_name["pyvene"].required_package == "pyvene"
 
 
 def test_discover_all_available(monkeypatch, capsys) -> None:
     monkeypatch.setattr(reg, "is_package_available", lambda pkg: True)
     classes = reg.discover()
     class_names = {c.name for c in classes}
-    assert {"vllm", "transformerlens"} <= class_names
+    assert _ALL_ENGINES <= class_names
     out = capsys.readouterr().out
     assert "vllm: available" in out
+    for name in ("hf_baseline", "nnsight", "repeng", "pyvene"):
+        assert f"{name}: available" in out
+
+
+def test_discover_skips_new_engines_when_package_absent(monkeypatch, capsys) -> None:
+    # Only transformers present; nnsight/repeng/pyvene absent.
+    present = {"transformers", "transformer_lens", "vllm"}
+    monkeypatch.setattr(reg, "is_package_available", lambda pkg: pkg in present)
+    classes = reg.discover()
+    class_names = {c.name for c in classes}
+    assert "hf_baseline" in class_names  # transformers is present
+    for name in ("nnsight", "repeng", "pyvene"):
+        assert name not in class_names
+    out = capsys.readouterr().out
+    for name, pkg in (("nnsight", "nnsight"), ("repeng", "repeng"), ("pyvene", "pyvene")):
+        assert f"{name}: SKIPPED ({pkg} not installed)" in out
 
 
 def test_discover_filter_by_name(monkeypatch) -> None:
