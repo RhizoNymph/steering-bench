@@ -156,7 +156,7 @@ NUM_LAYERS = 34
 
 shared = random_steering_vectors(
     hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS,
-    hook_points=["post_mlp"], scale=0.1, seed=42,
+    hook_points=["post_block"], scale=0.1, seed=42,
 )
 def _coerce(v):
     # ``random_steering_vectors`` already returns plain Python lists,
@@ -183,7 +183,7 @@ def build_body(i):
         k = int(mode.split("_n")[-1])
         diverse = random_steering_vectors_diverse(
             hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS,
-            num_configs=k, hook_points=["post_mlp"],
+            num_configs=k, hook_points=["post_block"],
             scale=0.1, base_seed=42,
         )
         return {"steering_vectors": _coerce(diverse[i % k])}
@@ -204,7 +204,7 @@ sys.path.insert(0, "src")
 import httpx
 from steering_bench.vectors import random_steering_vectors
 v = random_steering_vectors(
-    hidden_size=2560, num_layers=34, hook_points=["post_mlp"],
+    hidden_size=2560, num_layers=34, hook_points=["post_block"],
     scale=0.1, seed=42,
 )
 def _coerce_layer(val):

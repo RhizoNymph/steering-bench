@@ -51,7 +51,7 @@ def _run_one(
         VllmInternalRequestId,
     )
 
-    hook = "post_mlp"
+    hook = "post_block"
     layers = list(range(num_layers))
     consumer = FilesystemConsumer(
         vllm_config=MagicMock(),

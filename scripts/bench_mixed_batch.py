@@ -101,7 +101,7 @@ def run_mixed(
             v = random_steering_vectors(
                 hidden_size=hidden_size,
                 num_layers=num_layers,
-                hook_points=["post_mlp"],
+                hook_points=["post_block"],
                 scale=0.1,
                 seed=42 + i,
             )
@@ -116,7 +116,7 @@ def run_mixed(
         shared_vectors = random_steering_vectors(
             hidden_size=hidden_size,
             num_layers=num_layers,
-            hook_points=["post_mlp"],
+            hook_points=["post_block"],
             scale=0.1,
             seed=42,
         )

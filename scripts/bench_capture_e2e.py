@@ -113,7 +113,7 @@ def _build_configs(
     all_layers = list(range(num_layers))
 
     driver_consumer = RecordingDriverConsumer(
-        hooks={"post_mlp": [mid_layer]},
+        hooks={"post_block": [mid_layer]},
         positions="last_prompt",
     )
 
@@ -122,7 +122,7 @@ def _build_configs(
     fs_capture_spec = {
         "request_id": "bench",
         "tag": "benchmark",
-        "hooks": {"post_mlp": [mid_layer]},
+        "hooks": {"post_block": [mid_layer]},
         "positions": "last_prompt",
     }
 
@@ -133,7 +133,7 @@ def _build_configs(
             {
                 "name": "logging",
                 "params": {
-                    "hooks": {"post_mlp": [mid_layer]},
+                    "hooks": {"post_block": [mid_layer]},
                     "positions": "last_prompt",
                     "level": "WARNING",
                 },
@@ -143,7 +143,7 @@ def _build_configs(
             {
                 "name": "logging",
                 "params": {
-                    "hooks": {"post_mlp": all_layers},
+                    "hooks": {"post_block": all_layers},
                     "positions": "all",
                     "level": "WARNING",
                 },
@@ -154,7 +154,7 @@ def _build_configs(
                 "name": "logging",
                 "instance_name": "log_a",
                 "params": {
-                    "hooks": {"post_mlp": [mid_layer]},
+                    "hooks": {"post_block": [mid_layer]},
                     "positions": "last_prompt",
                     "level": "WARNING",
                 },
@@ -163,7 +163,7 @@ def _build_configs(
                 "name": "logging",
                 "instance_name": "log_b",
                 "params": {
-                    "hooks": {"post_mlp": [mid_layer]},
+                    "hooks": {"post_block": [mid_layer]},
                     "positions": "last_prompt",
                     "level": "WARNING",
                 },
@@ -172,7 +172,7 @@ def _build_configs(
                 "name": "logging",
                 "instance_name": "log_c",
                 "params": {
-                    "hooks": {"post_mlp": [mid_layer]},
+                    "hooks": {"post_block": [mid_layer]},
                     "positions": "last_prompt",
                     "level": "WARNING",
                 },

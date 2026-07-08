@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ablation benchmark: active hook point count.
 
-1x3 sweep: 1 hook (post_mlp), 2 hooks (post_attn+post_mlp), 3 hooks (all).
+1x3 sweep: 1 hook (post_block), 2 hooks (post_attn+post_block), 3 hooks (all).
 
 Key question: does the number of non-zero hook points affect latency?
 The steering op runs at all 3 hook points regardless — even zero-path calls
@@ -35,17 +35,17 @@ MODEL_CONFIGS = {
 HOOK_CONFIGS = [
     {
         "name": "1_hook",
-        "active": ["post_mlp"],
-        "description": "post_mlp only",
+        "active": ["post_block"],
+        "description": "post_block only",
     },
     {
         "name": "2_hooks",
-        "active": ["post_attn", "post_mlp"],
-        "description": "post_attn + post_mlp",
+        "active": ["post_attn", "post_block"],
+        "description": "post_attn + post_block",
     },
     {
         "name": "3_hooks",
-        "active": ["pre_attn", "post_attn", "post_mlp"],
+        "active": ["pre_attn", "post_attn", "post_block"],
         "description": "all three",
     },
 ]

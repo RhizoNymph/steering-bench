@@ -127,7 +127,7 @@ def run_throughput(
     else:
         max_steering = 4
 
-    all_hooks = ["post_mlp", "post_attn", "pre_attn"]
+    all_hooks = ["post_block", "post_attn", "pre_attn"]
     if num_hooks < 1 or num_hooks > len(all_hooks):
         raise ValueError(
             f"num_hooks must be in [1, {len(all_hooks)}], got {num_hooks}"

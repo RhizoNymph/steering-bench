@@ -126,7 +126,7 @@ def run_mode(
       ``steering_module_ref``.  This is the floor for the spec-reuse case.
 
     Sweeps ``num_hooks`` (1, 2, or 3 — picked from
-    ``[\"post_mlp\", \"post_attn\", \"pre_attn\"]``) and
+    ``[\"post_block\", \"post_attn\", \"pre_attn\"]``) and
     ``num_layers_steered`` (subset of layers via
     :func:`even_layer_subset`) so the matrix runner can attribute cost
     to "how much" steering is happening.
@@ -150,7 +150,7 @@ def run_mode(
 
     # Pick the hook points and layer subset shared by every steering mode
     # in this run.
-    all_hooks = ["post_mlp", "post_attn", "pre_attn"]
+    all_hooks = ["post_block", "post_attn", "pre_attn"]
     if num_hooks < 1 or num_hooks > len(all_hooks):
         raise ValueError(
             f"num_hooks must be in [1, {len(all_hooks)}], got {num_hooks}"
@@ -293,7 +293,7 @@ def main():
         type=int,
         default=1,
         help="Number of hook points to populate per request (1..3, picked "
-             "from [post_mlp, post_attn, pre_attn]).",
+             "from [post_block, post_attn, pre_attn]).",
     )
     parser.add_argument(
         "--num-layers-steered",

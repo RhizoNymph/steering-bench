@@ -26,7 +26,7 @@ def random_steering_vectors(
         num_layers: Number of decoder layers (used as upper bound when
             ``layer_subset`` is None).
         hook_points: Which hook points to generate for.
-            Defaults to ["post_mlp"].
+            Defaults to ["post_block"].
         scale: Scale factor for random values (keep small to avoid
             destabilizing generation).
         seed: Random seed for reproducibility.
@@ -41,7 +41,7 @@ def random_steering_vectors(
         ``{hook_point: {layer_idx: [floats]}}``
     """
     if hook_points is None:
-        hook_points = ["post_mlp"]
+        hook_points = ["post_block"]
 
     if layer_subset is None:
         layer_indices = list(range(num_layers))

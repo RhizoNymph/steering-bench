@@ -300,9 +300,11 @@ def _run_cell(args: argparse.Namespace) -> dict[str, Any]:
     )
     if enable_steering:
         kwargs["enable_steering"] = True
-        # Per-request arms need one dynamic-pool row per concurrent request.
+        # Per-request arms need one dynamic-pool row per concurrent request;
+        # +4 headroom avoids an exactly-full pool at the batch/generate seam.
+        # Tier arms use a single global config, so 4 is plenty for them.
         kwargs["max_dynamic_steering_configs"] = (
-            max(args.batch_size, 4) if args.arm in PERREQ_ARMS else 4
+            max(args.batch_size + 4, 8) if args.arm in PERREQ_ARMS else 4
         )
         if enable_row_monitor:
             # Verified plumbing: LLM(**kwargs) forwards this straight into

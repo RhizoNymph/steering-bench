@@ -559,7 +559,7 @@ def main():
     )
     parser.add_argument("--mode", choices=["microbench", "e2e"], required=True)
     parser.add_argument("--model", default="google/gemma-3-4b-it")
-    parser.add_argument("--hook-name", default="post_mlp")
+    parser.add_argument("--hook-name", default="post_block")
     parser.add_argument("--prompt-len", type=int, default=64)
     parser.add_argument("--position-type", default="last_prompt")
     parser.add_argument("--num-layers", default=17,

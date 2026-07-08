@@ -125,9 +125,9 @@ def main():
     layer_counts = [26, 34, 42]
     config_counts = [1, 4, 8, 16]
     hook_point_sets = [
-        (["post_mlp"], "1_hook"),
-        (["post_attn", "post_mlp"], "2_hooks"),
-        (["pre_attn", "post_attn", "post_mlp"], "3_hooks"),
+        (["post_block"], "1_hook"),
+        (["post_attn", "post_block"], "2_hooks"),
+        (["pre_attn", "post_attn", "post_block"], "3_hooks"),
     ]
 
     total = len(layer_counts) * len(config_counts) * len(hook_point_sets)
