@@ -48,6 +48,12 @@ def main() -> None:
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--iters", type=int, default=4)
     p.add_argument("--enforce-eager", action="store_true")
+    p.add_argument("--max-model-len", type=int, default=None,
+                   help="override max_model_len (default prompt+output+64); "
+                        "use to bound KV/cudagraph memory on large models")
+    p.add_argument("--max-num-seqs", type=int, default=None,
+                   help="override max_num_seqs (caps KV/cudagraph reservation)")
+    p.add_argument("--gpu-mem-util", type=float, default=0.92)
     args = p.parse_args()
 
     import numpy as np
@@ -63,10 +69,12 @@ def main() -> None:
     sp_list = [SamplingParams(**sp_kwargs)] * args.batch_size
 
     kwargs = dict(
-        model=args.model, gpu_memory_utilization=0.92,
-        max_model_len=args.prompt_len + args.output_len + 64,
+        model=args.model, gpu_memory_utilization=args.gpu_mem_util,
+        max_model_len=args.max_model_len or (args.prompt_len + args.output_len + 64),
         enforce_eager=args.enforce_eager, seed=0,
     )
+    if args.max_num_seqs is not None:
+        kwargs["max_num_seqs"] = args.max_num_seqs
     if args.arm in ("static", "dynamic"):
         kwargs["enable_steering"] = True
     if args.arm == "dynamic":
