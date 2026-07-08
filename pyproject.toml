@@ -16,6 +16,9 @@ dependencies = [
     "plotly>=5.18",
 ]
 
+[project.scripts]
+steering-bench = "steering_bench.__main__:main"
+
 [project.optional-dependencies]
 vllm = ["vllm"]
 transformerlens = ["transformer-lens>=2.0"]
