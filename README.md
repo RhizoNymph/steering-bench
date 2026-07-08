@@ -110,6 +110,27 @@ pyvene. Default model `meta-llama/Llama-3.2-1B`. Flags: `--layer 8`,
 (single-request), `--skip-tier2` (batched), plus the common timing/output flags.
 Batch size for Tier 2 defaults to 16.
 
+### Activation-patching comparison (`results/patching/`)
+
+`bench_patching_external.py` runs the identical causal-tracing denoising sweep
+(all layers x all prompt positions, recovered metric) through TransformerLens
+(`tl_naive` per-cell loop, `tl_batched` position-batched) and vLLM's one-call
+`POST /v1/patch_sweep` (`vllm_sweep`, against a running `--enable-patching`
+server; includes HTTP + server-side clean-run auto-capture + baselines +
+noise floor). Default model `Qwen/Qwen3-0.6B` (`--num-layers 28`). Prompt
+sizes `short,long,xl` (~6/40/204 tokens). The TL variants load the model
+in-process, so run them and the server measurement in separate GPU sessions:
+
+```bash
+uv run scripts/bench_patching_external.py --variants vllm_sweep \
+    --base-url http://localhost:8000/v1
+uv run scripts/bench_patching_external.py --variants tl_batched,tl_naive
+```
+
+Each result records the recovered-metric argmax cell, so cross-tool agreement
+doubles as a correctness check (the script warns if variants disagree on the
+causal position).
+
 ### Profiling and correctness
 
 | Script | Purpose | Flags |

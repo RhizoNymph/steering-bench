@@ -78,6 +78,12 @@ All results share a common JSON schema with environment metadata, parameters, an
 - depends_on: [core]
 - doc: docs/features/capture_consumers.md
 
+### dynamic_steering
+- description: End-to-end overhead of the dynamic-steering / capture-consumer tiers vs a no-capture/no-steering baseline on a gemma4 model. Six arms (off, capture_async, capture_sync, steer_async, steer_sync, steer_dynamic) decompose capture-pipeline cost, sync-vs-async on_step cost, the steering kernel, and the three tier transports head-to-head. Doubles as a capture-consumer perf benchmark.
+- entry_points: [scripts/bench_dynamic_steering.py, src/steering_bench/capture_consumers/bench_consumers.py]
+- depends_on: [core, capture_consumers]
+- doc: docs/features/dynamic_steering_bench.md
+
 ## Performance / Investigation Docs
 
 - `docs/performance.md` — consolidated steady-state perf characteristics and prior optimization passes
