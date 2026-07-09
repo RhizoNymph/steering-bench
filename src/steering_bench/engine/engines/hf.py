@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from steering_bench.engine.base import Capabilities, SteeringEngine
+from steering_bench.engine.base import Capabilities, SteeringConfig, SteeringEngine
 from steering_bench.engine.spec import GenerationRequest, GenerationResult
 
 
@@ -35,7 +35,15 @@ class HFSteeringEngine(SteeringEngine):
         self._model: Any | None = None
         self._tokenizer: Any | None = None
 
-    def load(self, model_id: str, **opts: object) -> None:
+    def load(
+        self,
+        model_id: str,
+        *,
+        steering_config: SteeringConfig | None = None,
+        **opts: object,
+    ) -> None:
+        # No fork-specific steering knobs; steering_config is ignored (no-op).
+        del steering_config
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 

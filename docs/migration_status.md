@@ -17,8 +17,8 @@ Status legend: **migrated** (all four applied), **partial** (some applied),
 
 | Script | Status | Notes |
 |--------|--------|-------|
-| `bench_latency.py` | migrated | Dims from `harness.models`; no `sys.path`; `--engine` guarded to `vllm` (fork-only modes: `named_shared`, `inline_unique`, prefix caching, per-request `max_steering_configs`); `engine` block stamped. Engine-agnostic subset: `run latency`. |
-| `bench_throughput.py` | migrated | Same treatment as `bench_latency.py`; `--engine` guarded to `vllm`. |
+| `bench_latency.py` | migrated | Dims from `harness.models`; no `sys.path`; `--engine` guarded to `vllm`; `engine` block stamped. As of **Phase 3** the engine-agnostic offline modes (`disabled`/`enabled_idle`/`inline_shared`/`inline_unique`/`named_shared`/`per_request_N`) are first-class in the seam+harness (`run latency --mode ...`); named modules + load-time steering config now live in the seam. Script retained for fork-specific nuances (prefix-cache isolation, auto-promote, mode×batch matrix) pending Phase 7. |
+| `bench_throughput.py` | migrated | Same as `bench_latency.py`; engine-agnostic successor is `run throughput --mode ...` (Phase 3). Script retained for fork nuances pending Phase 7. |
 | `bench_memory.py` | migrated | Dims from `harness.models`; no `sys.path`; `--engine` guarded to `vllm` (measures fork steering buffers via `num_gpu_blocks_override` — no generation, no seam equivalent); `engine` block stamped. |
 | `bench_external.py` | replaced (Phase 2) | Now a thin **deprecation shim** forwarding old flags to `python -m steering_bench run external-comparison`. The per-library `external/` adapters (hf_baseline, transformerlens, nnsight, repeng, pyvene, vllm_single/batched) and the `external/base.py::SteeringBenchmark` protocol were retired; each library is now a `SteeringEngine` adapter under `engine/engines/`. `external-comparison` covers both tiers via `--batch-size`. |
 

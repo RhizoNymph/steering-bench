@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from steering_bench.engine.base import Capabilities, SteeringEngine
+from steering_bench.engine.base import Capabilities, SteeringConfig, SteeringEngine
 from steering_bench.engine.spec import (
     GenerationRequest,
     GenerationResult,
@@ -20,13 +20,15 @@ from steering_bench.engine.spec import (
     SteeringSpec,
 )
 
-# vLLM load defaults, matching the legacy external adapters.
+# vLLM load defaults for knobs the typed SteeringConfig does not cover.
 _DEFAULT_LOAD_OPTS: dict[str, Any] = {
-    "enable_steering": True,
-    "max_steering_configs": 4,
     "gpu_memory_utilization": 0.9,
     "max_model_len": 2048,
 }
+# Default load-time steering configuration when a caller passes none.
+_DEFAULT_STEERING_CONFIG = SteeringConfig(
+    enable_steering=True, max_steering_configs=4, enable_prefix_caching=True
+)
 
 
 def spec_to_native(spec: SteeringSpec) -> dict[str, dict[int, list[float]]]:
@@ -39,8 +41,48 @@ def spec_to_native(spec: SteeringSpec) -> dict[str, dict[int, list[float]]]:
 
 
 def named_ref_to_kwargs(ref: NamedModuleRef) -> dict[str, Any]:
-    """Translate a ``NamedModuleRef`` to ``SamplingParams`` kwargs."""
-    return {"steering_module_ref": ref.name}
+    """Translate a ``NamedModuleRef`` to ``SamplingParams`` kwargs.
+
+    The vLLM steering fork expects ``steering_module_ref`` as a
+    ``(name, scale)`` tuple, not a bare name string.
+    """
+    return {"steering_module_ref": (ref.name, ref.scale)}
+
+
+def _coerce_vector(vec: Any) -> list[float]:
+    """Coerce a single vector (list / tuple / numpy array) to a list of floats."""
+    tolist = getattr(vec, "tolist", None)
+    if callable(tolist):  # numpy array / torch tensor
+        vec = tolist()
+    return [float(x) for x in vec]
+
+
+def named_payload_from_spec(
+    spec: SteeringSpec,
+    *,
+    prefill: SteeringSpec | None = None,
+    decode: SteeringSpec | None = None,
+) -> dict[str, Any]:
+    """Build the ``register_steering_modules`` payload for one module.
+
+    Produces ``{"vectors": {hook: {layer: [floats]}}}`` from a ``SteeringSpec``,
+    coercing numpy arrays / tuples to plain lists.  Pure: no vllm import.  When
+    ``prefill`` / ``decode`` specs are given, their vectors are attached under
+    ``"prefill_vectors"`` / ``"decode_vectors"`` for phase-split serving.
+    """
+    payload: dict[str, Any] = {"vectors": _spec_vectors(spec)}
+    if prefill is not None:
+        payload["prefill_vectors"] = _spec_vectors(prefill)
+    if decode is not None:
+        payload["decode_vectors"] = _spec_vectors(decode)
+    return payload
+
+
+def _spec_vectors(spec: SteeringSpec) -> dict[str, dict[int, list[float]]]:
+    return {
+        hook: {int(layer): _coerce_vector(vec) for layer, vec in layers.items()}
+        for hook, layers in spec.vectors.items()
+    }
 
 
 def steering_kwargs(steering: Steering) -> dict[str, Any]:
@@ -65,16 +107,50 @@ class VllmSteeringEngine(SteeringEngine):
         multi_layer=True,
         multi_hook=True,
         capture=True,
+        prefix_cache=True,
+        config_capacity=True,
     )
 
     def __init__(self) -> None:
         self._llm: Any | None = None
 
-    def load(self, model_id: str, **opts: object) -> None:
+    def load(
+        self,
+        model_id: str,
+        *,
+        steering_config: SteeringConfig | None = None,
+        **opts: object,
+    ) -> None:
         from vllm import LLM
 
-        load_opts = {**_DEFAULT_LOAD_OPTS, **opts}
+        cfg = steering_config or _DEFAULT_STEERING_CONFIG
+        load_opts: dict[str, Any] = {
+            **_DEFAULT_LOAD_OPTS,
+            "enable_steering": cfg.enable_steering,
+            "max_steering_configs": cfg.max_steering_configs,
+            "enable_prefix_caching": cfg.enable_prefix_caching,
+            **opts,
+        }
         self._llm = LLM(model=model_id, **load_opts)
+
+    def register_module(
+        self,
+        name: str,
+        spec: SteeringSpec,
+        *,
+        replace: bool = True,
+        prefill: SteeringSpec | None = None,
+        decode: SteeringSpec | None = None,
+    ) -> None:
+        if self._llm is None:
+            raise RuntimeError(
+                "VllmSteeringEngine.register_module called before load()"
+            )
+        payload = named_payload_from_spec(spec, prefill=prefill, decode=decode)
+        self._llm.llm_engine.collective_rpc(
+            "register_steering_modules",
+            kwargs={"modules": {name: payload}, "replace": replace},
+        )
 
     def generate(self, requests: list[GenerationRequest]) -> list[GenerationResult]:
         from vllm import SamplingParams

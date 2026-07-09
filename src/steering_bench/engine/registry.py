@@ -38,6 +38,8 @@ ENGINE_REGISTRY: list[EngineEntry] = [
             multi_layer=True,
             multi_hook=True,
             capture=True,
+            prefix_cache=True,
+            config_capacity=True,
         ),
     ),
     EngineEntry(

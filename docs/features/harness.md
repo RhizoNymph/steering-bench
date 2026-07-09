@@ -98,11 +98,13 @@ get_model_config(model_id)
 |------|------|-------------|
 | `src/steering_bench/harness/models.py` | Model-dimension resolution | `ModelConfig`, `MODEL_CONFIGS`, `get_model_config`, `ModelConfigError` |
 | `src/steering_bench/harness/args.py` | Shared argparse flags | `add_common_args`, `engine_names`, `DEFAULT_*` |
-| `src/steering_bench/harness/benchmark.py` | Lifecycle base class | `Benchmark` (`build_requests`, `parameters`, `load_opts`, `extra_results`, `add_args`, `options_from_args`, `run`, `is_comparison`), `BenchmarkConfig` |
-| `src/steering_bench/harness/benchmarks/workload.py` | Workload builders | `steering_spec_for`, `make_prompt`, `steered_requests` |
-| `src/steering_bench/harness/benchmarks/latency.py` | Latency benchmark | `LatencyBenchmark` |
+| `src/steering_bench/harness/benchmark.py` | Lifecycle base class | `Benchmark` (`build_requests`, `parameters`, `load_opts`, `steering_config`, `after_load`, `extra_results`, `add_args`, `options_from_args`, `run`, `is_comparison`), `BenchmarkConfig` |
+| `src/steering_bench/harness/benchmarks/workload.py` | Workload builders | `steering_spec_for`, `diverse_steering_specs`, `make_prompt`, `steered_requests` |
+| `src/steering_bench/harness/benchmarks/modes.py` | Engine-agnostic steering mode catalog + `ModeBenchmark` base | `parse_mode`, `mode_enable_steering`, `mode_needs_named_module`, `max_steering_configs_for`, `steering_config_for`, `build_mode_requests`, `ModeBenchmark`, `NAMED_MODULE`, `ModeError` |
+| `src/steering_bench/harness/benchmarks/latency.py` | Latency benchmark (mode-driven) | `LatencyBenchmark` |
+| `src/steering_bench/harness/benchmarks/throughput.py` | Throughput benchmark (mode-driven, tokens/sec) | `ThroughputBenchmark` |
 | `src/steering_bench/harness/benchmarks/external_comparison.py` | Cross-engine comparison | `ExternalComparisonBenchmark` |
-| `src/steering_bench/harness/benchmarks/registry.py` | Benchmark registry | `BENCHMARK_REGISTRY`, `get_benchmark` |
+| `src/steering_bench/harness/benchmarks/registry.py` | Benchmark registry | `BENCHMARK_REGISTRY` (latency, throughput, external-comparison), `get_benchmark` |
 | `src/steering_bench/harness/__init__.py` | Public re-exports | (surface above) |
 | `src/steering_bench/__main__.py` | CLI | `main`, `cmd_run`, `cmd_list`, `cmd_engines` |
 | `pyproject.toml` `[project.scripts]` | Console entry point | `steering-bench = steering_bench.__main__:main` |
@@ -127,3 +129,29 @@ get_model_config(model_id)
   every discovered engine.
 - **Additive.** Nothing in `scripts/`, `external/`, or the existing tests is
   modified; migrating those onto the harness is Phase C.
+
+## Steering modes (Phase 3)
+
+`latency` and `throughput` are `ModeBenchmark` subclasses driven by
+`harness/benchmarks/modes.py`, the engine-agnostic successor to the fork-guarded
+offline logic in `scripts/bench_latency.py`/`bench_throughput.py`. Each mode is
+data mapping to (a) how it builds `GenerationRequest`s, (b) whether it needs
+`register_module`, and (c) its load-time `SteeringConfig`:
+
+| mode | requests | enable_steering | max_steering_configs |
+|------|----------|-----------------|----------------------|
+| `disabled` | steering=None | False | 4 |
+| `enabled_idle` | steering=None | True | 4 |
+| `inline_shared` | one shared `SteeringSpec` | True | 4 |
+| `inline_unique` | fresh `SteeringSpec` per request | True | `max(64, batch×2)` |
+| `named_shared` | `NamedModuleRef(NAMED_MODULE)`, registered in `after_load` | True | 4 |
+| `per_request_N` | cycle N distinct specs | True | `max(4N, 16)` |
+
+`ModeBenchmark.steering_config()` returns the mode's `SteeringConfig` (passed to
+`load`); `after_load()` registers the module for `named_shared`. **Degradation:**
+on an engine without `named_modules`, `named_shared` falls back to inline-shared
+(same vectors, delivered inline) with a printed notice and `named_shared_fallback:
+True` in the result parameters — the honest cross-engine choice (still produces
+comparable data rather than skipping). Sweeping several modes / batch sizes is
+done by repeated CLI runs; the `scripts/*` matrices remain for fork-specific
+deep-dives (prefix-cache isolation, auto-promote) pending Phase 7.

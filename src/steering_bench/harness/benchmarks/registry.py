@@ -7,9 +7,11 @@ from steering_bench.harness.benchmarks.external_comparison import (
     ExternalComparisonBenchmark,
 )
 from steering_bench.harness.benchmarks.latency import LatencyBenchmark
+from steering_bench.harness.benchmarks.throughput import ThroughputBenchmark
 
 BENCHMARK_REGISTRY: dict[str, type[Benchmark]] = {
     "latency": LatencyBenchmark,
+    "throughput": ThroughputBenchmark,
     "external-comparison": ExternalComparisonBenchmark,
 }
 

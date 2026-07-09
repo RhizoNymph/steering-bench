@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from steering_bench.engine.spec import GenerationRequest, SteeringSpec
 from steering_bench.harness.models import get_model_config
-from steering_bench.vectors import random_steering_vectors
+from steering_bench.vectors import (
+    random_steering_vectors,
+    random_steering_vectors_diverse,
+)
 
 
 def steering_spec_for(model: str, layer: int, hook: str, seed: int = 42) -> SteeringSpec:
@@ -22,6 +25,29 @@ def steering_spec_for(model: str, layer: int, hook: str, seed: int = 42) -> Stee
         seed=seed,
     )
     return SteeringSpec.single(hook, layer, vectors[hook][layer])
+
+
+def diverse_steering_specs(
+    model: str, layer: int, hook: str, count: int, base_seed: int = 42
+) -> list[SteeringSpec]:
+    """Build ``count`` distinct single-hook/single-layer specs for ``model``.
+
+    Each spec uses a different seed (``base_seed + i``) so the vectors are all
+    distinct but reproducible -- the workload for ``inline_unique`` /
+    ``per_request_N`` modes where vector reuse cannot be amortized.
+    """
+    if count <= 0:
+        raise ValueError(f"count must be > 0, got {count}")
+    cfg = get_model_config(model)
+    diverse = random_steering_vectors_diverse(
+        hidden_size=cfg.hidden_size,
+        num_layers=cfg.num_layers,
+        num_configs=count,
+        hook_points=[hook],
+        scale=0.1,
+        base_seed=base_seed,
+    )
+    return [SteeringSpec.single(hook, layer, vectors[hook][layer]) for vectors in diverse]
 
 
 def make_prompt(prompt_len: int = 64) -> str:
