@@ -166,7 +166,7 @@ def main():
                 results_map[cfg["label"]][batch_size] = stats
 
             except torch.cuda.OutOfMemoryError:
-                print(f"    OOM!")
+                print("    OOM!")
                 results_map[cfg["label"]][batch_size] = {"error": "OOM"}
 
             params = {
@@ -205,7 +205,7 @@ def main():
     print(f"{'=' * 95}")
 
     # Raw latencies
-    print(f"\n  Raw Latencies (mean ms):")
+    print("\n  Raw Latencies (mean ms):")
     print(f"  {'batch':>6} {'graphs_no_steer':>18} {'graphs_w_steer':>18} {'eager_no_steer':>18} {'eager_w_steer':>18}")
     print(f"  {'-' * 90}")
     for bs in batch_sizes:
@@ -219,7 +219,7 @@ def main():
         print(f"  {bs:>6} {vals[0]:>18} {vals[1]:>18} {vals[2]:>18} {vals[3]:>18}")
 
     # Derived analysis
-    print(f"\n  Derived Metrics:")
+    print("\n  Derived Metrics:")
     print(f"  {'batch':>6} {'graph_speedup':>14} {'graph_speedup':>14} {'steer_overhead':>16} {'steer_overhead':>16}")
     print(f"  {'':>6} {'(no steer)':>14} {'(w/ steer)':>14} {'(w/ graphs)':>16} {'(eager)':>16}")
     print(f"  {'-' * 90}")
@@ -249,7 +249,7 @@ def main():
         print(f"  {bs:>6} {gs_no:>14} {gs_ws:>14} {so_g:>16} {so_e:>16}")
 
     # Interaction effect
-    print(f"\n  Interaction Effect:")
+    print("\n  Interaction Effect:")
     for bs in batch_sizes:
         gns = results_map["graphs_no_steer"].get(bs, {})
         gws = results_map["graphs_with_steer"].get(bs, {})

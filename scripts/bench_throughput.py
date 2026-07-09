@@ -398,7 +398,7 @@ def main():
                 print(f"    throughput loss vs baseline: {overhead_pct:.1f}%")
 
         except torch.cuda.OutOfMemoryError:
-            print(f"    OOM!")
+            print("    OOM!")
             result = {"error": "OOM"}
             overhead_pct = None
 

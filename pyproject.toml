@@ -71,3 +71,18 @@ testpaths = ["tests"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
+
+# Optional engine backends are lazily imported and ship no type stubs; don't
+# flag their absence as a hard error (they're extras, not core deps).
+[[tool.mypy.overrides]]
+module = [
+    "vllm.*",
+    "transformers.*",
+    "transformer_lens.*",
+    "nnsight.*",
+    "repeng.*",
+    "pyvene.*",
+    "openai.*",
+    "httpx.*",
+]
+ignore_missing_imports = true

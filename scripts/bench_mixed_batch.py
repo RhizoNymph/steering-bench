@@ -331,7 +331,7 @@ def main():
             )
 
         except torch.cuda.OutOfMemoryError:
-            print(f"    OOM!")
+            print("    OOM!")
             result = {"error": "OOM"}
 
         if num_active == 0:

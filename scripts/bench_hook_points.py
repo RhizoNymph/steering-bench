@@ -188,7 +188,7 @@ def main():
                 print(f"    mean={mean:.1f}ms p90={p90:.1f}ms overhead={overhead_str}")
 
             except torch.cuda.OutOfMemoryError:
-                print(f"    OOM!")
+                print("    OOM!")
                 stats = {"error": "OOM"}
                 overhead_pct = None
 

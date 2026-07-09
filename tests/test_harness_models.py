@@ -18,7 +18,6 @@ from steering_bench.harness.models import (
     get_model_config,
 )
 
-
 # -- static table --------------------------------------------------------------
 
 

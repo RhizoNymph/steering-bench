@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 import torch
 
 from steering_bench.capture_consumers.consumers import NullCaptureSink
-from steering_bench.output import print_result_summary, write_result
+from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 
 # ──────────────────────────────────────────────────────────── model configs

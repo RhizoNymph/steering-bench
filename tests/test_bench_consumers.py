@@ -18,16 +18,25 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-from steering_bench.capture_consumers import bench_consumers as bc
-from vllm.model_executor.layers.steering import (
+# This module exercises the dynamic-steering fork's worker internals. It is
+# only runnable against a vLLM fork branch that ships
+# ``vllm.v1.worker.steering_action_queue`` (see the module docstring). When
+# that branch isn't installed, skip the whole module cleanly at collection
+# instead of erroring — so a bare ``pytest`` run stays green everywhere.
+pytest.importorskip("vllm.v1.worker.steering_action_queue")
+pytest.importorskip("vllm.model_executor.layers.steering")
+
+from vllm.model_executor.layers.steering import (  # noqa: E402
     VALID_HOOK_POINT_NAMES,
     SteeringHookPoint,
 )
-from vllm.v1.worker.steering_action_queue import (
+from vllm.v1.worker.steering_action_queue import (  # noqa: E402
     RequestSteeringOverride,
     SteeringMonitorUpdate,
     SteeringVectorUpdate,
 )
+
+from steering_bench.capture_consumers import bench_consumers as bc  # noqa: E402
 
 HIDDEN = 2560
 

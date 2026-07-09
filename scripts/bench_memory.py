@@ -236,7 +236,7 @@ def main():
                 raise
 
         if mem is None:
-            print(f"  Skipped: OOM at all retry levels")
+            print("  Skipped: OOM at all retry levels")
             all_results.append({
                 "max_configs": max_configs,
                 "results": {"error": "OOM"},

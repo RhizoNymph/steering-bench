@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import torch
 
-from steering_bench.output import print_result_summary, write_result
+from steering_bench.output import write_result
 from steering_bench.timing import cuda_timer
 
 # Try to use the registered custom op; fall back to reference impl

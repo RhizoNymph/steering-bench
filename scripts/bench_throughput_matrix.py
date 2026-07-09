@@ -224,7 +224,7 @@ def main():
                 raw_samples_ms=result["latency"].get("samples_ms"),
             )
         except torch.cuda.OutOfMemoryError:
-            print(f"    OOM!")
+            print("    OOM!")
             results_map[("disabled", bs)] = {"error": "OOM"}
 
     del llm
@@ -329,7 +329,7 @@ def main():
 
     # Latency table
     print(f"\n{'=' * 90}")
-    print(f"  Latency (ms) by mode x batch_size")
+    print("  Latency (ms) by mode x batch_size")
     print(f"{'=' * 90}")
     header = f"{'mode':<16}"
     for bs in batch_sizes:
@@ -347,7 +347,7 @@ def main():
 
     # Throughput table
     print(f"\n{'=' * 90}")
-    print(f"  Throughput (tok/s) by mode x batch_size")
+    print("  Throughput (tok/s) by mode x batch_size")
     print(f"{'=' * 90}")
     header = f"{'mode':<16}"
     for bs in batch_sizes:
@@ -365,7 +365,7 @@ def main():
 
     # Overhead vs disabled
     print(f"\n{'=' * 90}")
-    print(f"  Latency overhead (%) vs disabled at same batch size")
+    print("  Latency overhead (%) vs disabled at same batch size")
     print(f"{'=' * 90}")
     header = f"{'mode':<16}"
     for bs in batch_sizes:
@@ -390,7 +390,7 @@ def main():
 
     # Throughput loss vs disabled
     print(f"\n{'=' * 90}")
-    print(f"  Throughput loss (%) vs disabled at same batch size")
+    print("  Throughput loss (%) vs disabled at same batch size")
     print(f"{'=' * 90}")
     header = f"{'mode':<16}"
     for bs in batch_sizes:

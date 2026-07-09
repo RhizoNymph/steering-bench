@@ -7,7 +7,6 @@ import queue as _queue
 from collections.abc import Callable
 from typing import Any
 
-
 MODEL_CONFIGS: dict[str, dict[str, int]] = {
     "facebook/opt-125m": {"hidden_size": 768, "num_layers": 12},
     "facebook/opt-350m": {"hidden_size": 1024, "num_layers": 24},

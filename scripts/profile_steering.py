@@ -21,7 +21,6 @@ back to Nsight Systems:
 from __future__ import annotations
 
 import argparse
-import gc
 import os
 from pathlib import Path
 
@@ -152,7 +151,7 @@ def profile_mode(
     )
 
     # Top CPU events
-    print(f"\n  Top 20 CPU events (by self_cpu_time_total):")
+    print("\n  Top 20 CPU events (by self_cpu_time_total):")
     print(
         prof.key_averages().table(
             sort_by="self_cpu_time_total",
@@ -161,7 +160,7 @@ def profile_mode(
     )
 
     # Steering-specific filter
-    print(f"\n  Steering-related events:")
+    print("\n  Steering-related events:")
     steering_events = []
     for avg in averages:
         name = avg.key.lower()
@@ -300,8 +299,8 @@ def main():
     print(f"  trace:      {data['trace_path']}")
     print(f"{'=' * 70}")
     print(
-        f"\nRun the other mode next to compare. "
-        f"Open Chrome traces at chrome://tracing or https://ui.perfetto.dev"
+        "\nRun the other mode next to compare. "
+        "Open Chrome traces at chrome://tracing or https://ui.perfetto.dev"
     )
 
 
