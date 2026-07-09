@@ -18,9 +18,15 @@ from dataclasses import fields
 from typing import Any
 
 from steering_bench.engine.registry import ENGINE_REGISTRY, discover, is_package_available
+from steering_bench.engine.serving import SERVING_ENGINE_REGISTRY, get_serving_engine
 from steering_bench.harness.args import add_common_args
 from steering_bench.harness.benchmark import Benchmark, BenchmarkConfig
-from steering_bench.harness.benchmarks.registry import BENCHMARK_REGISTRY, get_benchmark
+from steering_bench.harness.benchmarks.registry import (
+    BENCHMARK_REGISTRY,
+    SERVING_REGISTRY,
+    get_benchmark,
+    get_serving_benchmark,
+)
 
 PROG = "steering-bench"
 
@@ -53,6 +59,9 @@ def cmd_list(_: list[str]) -> int:
         cls = BENCHMARK_REGISTRY[name]
         kind = "comparison" if cls.is_comparison else "single-engine"
         print(f"  {name:<22} [{kind}]  {_summary_line(cls.__doc__)}")
+    for name in sorted(SERVING_REGISTRY):
+        cls = SERVING_REGISTRY[name]
+        print(f"  {name:<22} [serving]        {_summary_line(cls.__doc__)}")
     print()
     return 0
 
@@ -118,6 +127,29 @@ def _run_comparison(
     return 0
 
 
+def _run_serving(name: str, rest: list[str]) -> int:
+    """Drive a serving benchmark down the ServingEngine async path."""
+    bench_cls = get_serving_benchmark(name)
+    parser = argparse.ArgumentParser(prog=f"{PROG} run {name}")
+    parser.add_argument("benchmark", choices=[name])
+    add_common_args(parser)
+    bench_cls.add_args(parser)
+    args = parser.parse_args(rest)
+
+    serving_names = [e.name for e in SERVING_ENGINE_REGISTRY]
+    if args.engine not in serving_names:
+        print(
+            f"Engine {args.engine!r} has no serving transport; "
+            f"serving engines: {', '.join(serving_names)}."
+        )
+        return 1
+    engine = get_serving_engine(args.engine)()
+    config = _config_from_args(args)
+    options = bench_cls.options_from_args(args)
+    bench_cls(engine, config, **options).run()
+    return 0
+
+
 def cmd_run(rest: list[str]) -> int:
     # Peek at the benchmark name (help-agnostic, no choices/errors) so we can
     # register its extra flags before the real parse handles -h and validation.
@@ -125,10 +157,13 @@ def cmd_run(rest: list[str]) -> int:
     peek.add_argument("benchmark", nargs="?")
     known, _ = peek.parse_known_args(rest)
 
+    if known.benchmark in SERVING_REGISTRY:
+        return _run_serving(known.benchmark, rest)
+
     parser = argparse.ArgumentParser(prog=f"{PROG} run")
     parser.add_argument(
         "benchmark",
-        choices=sorted(BENCHMARK_REGISTRY),
+        choices=sorted(BENCHMARK_REGISTRY) + sorted(SERVING_REGISTRY),
         help="Benchmark to run.",
     )
     add_common_args(parser)

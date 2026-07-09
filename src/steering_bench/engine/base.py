@@ -101,6 +101,10 @@ class Capabilities:
     #: Honors ``SteeringConfig.max_steering_configs`` (a bounded worker-side
     #: steering-config table) at load time.
     config_capacity: bool = False
+    #: Exposes an online/HTTP serving transport (the ``ServingEngine`` seam:
+    #: subprocess API server + async streaming completions). Additive; the vLLM
+    #: serving adapter is the sole implementer today.
+    serving: bool = False
 
     def satisfies(self, required: Capabilities) -> bool:
         """True if ``self`` provides every capability ``required`` demands.
