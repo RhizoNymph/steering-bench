@@ -20,6 +20,16 @@ so `run capture` and the capture scripts select only capture-capable engines. Th
 manager-internal capture micros stay in `scripts/vllm_internal/` (fork-coupled, no
 cross-engine analog).
 
+**Phase 5 (serving seam):** online/HTTP serving is now its own `ServingEngine` ABC
+(`engine/serving.py`) — separate from `SteeringEngine` because the streaming
+transport + `start_server`/`stop_server` lifecycle cannot fit the synchronous
+`generate()` contract. Payload packing, the named-module register endpoint, and the
+timing dump are **owned by the adapter** (pure `pack_steering_vectors` /
+`named_register_payload` / `steering_extra_body` / metric functions) so scripts
+never hand-encode. `bench_serving.py` is migrated onto it; the `serving` capability
+was added to `Capabilities`, and `SteeringSpec` gained the Phase-3-deferred per-row
+`scales` + a `PhaseSteeringSpec` companion for phase-split registration.
+
 ## Headline scripts (Phase C target)
 
 | Script | Status | Notes |
@@ -48,7 +58,7 @@ drop the `sys.path` hack, and pass `engine=` to `write_result`.
 | `bench_max_tokens.py` | not-yet | Fork max-tokens sweep; local `MODEL_CONFIGS`. |
 | `bench_mixed_batch.py` | not-yet | Fork mixed-batch modes; local `MODEL_CONFIGS`. |
 | `bench_table_sizing.py` | not-yet | Fork steering-table sizing; local `MODEL_CONFIGS`. |
-| `bench_serving.py` | not-yet | Online HTTP serving internals; local `MODEL_CONFIGS`; no seam model. |
+| `bench_serving.py` | migrated (Phase 5) | Online HTTP serving. Now a thin driver over the `ServingEngine` seam: `VllmServingEngine` (`engine/engines/vllm_serving.py`) owns subprocess launch, the `AsyncOpenAI` streaming driver, `register_named_module`/`dump_and_reset_timings` endpoints, and per-request steering encoding (`pack_steering_vectors` base64 blob + `steering_name`) — all moved OUT of the script INTO the adapter. `ServingBenchmark` (`harness/benchmarks/serving.py`) drives it; model dims from `harness.models`; results stamp the `engine` block. Seam-native CLI: `python -m steering_bench run serving --engine vllm`. |
 | `bench_steering_with_capture.py` | migrated (Phase 4) | Steering × capture matrix in subprocesses. LLM construction, steering vectors, capture consumers, and the per-request capture opt-in now route through the CaptureEngine seam (`VllmSteeringEngine.configure_capture(CaptureConsumerSpec)` + `SteeringConfig` + `GenerationRequest(steering=SteeringSpec, capture=RequestCapture)`); no raw `from vllm import`. Subprocess-per-cell orchestration retained. |
 | `profile_steering.py` | not-yet | nsys/profiling harness; local `MODEL_CONFIGS`. |
 | `nsys_target.py` | not-yet | nsys profiling target; local `MODEL_CONFIGS`. |

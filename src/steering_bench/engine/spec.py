@@ -38,12 +38,22 @@ class SteeringSpec:
     normalized to tuples of floats on construction, so a spec is effectively
     immutable and cheap to compare.
 
+    ``scales`` is an OPTIONAL per-row multiplier list used by the online-serving
+    transport (see :mod:`steering_bench.engine.serving`).  When present it has
+    one float per vector in canonical row order -- hooks in insertion order,
+    layers ascending within each hook (:meth:`num_vectors` entries total) -- so
+    the packed wire form can attach a per-row ``scales`` list.  ``None`` (the
+    default) means "apply every vector as-is", preserving every pre-serving
+    construction unchanged.
+
     Invariants (enforced in ``__post_init__``):
       * at least one hook, and every hook has at least one layer,
-      * every vector for a given hook has the same, non-zero length.
+      * every vector for a given hook has the same, non-zero length,
+      * if ``scales`` is given, it has exactly :meth:`num_vectors` finite floats.
     """
 
     vectors: VectorMap
+    scales: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
         raw = self.vectors
@@ -54,6 +64,7 @@ class SteeringSpec:
             )
 
         normalized: VectorMap = {}
+        total_vectors = 0
         for hook, layers in raw.items():
             if not isinstance(hook, str) or not hook:
                 raise SteeringSpecError(f"hook point must be a non-empty str, got {hook!r}")
@@ -79,8 +90,26 @@ class SteeringSpec:
                 raise SteeringSpecError(f"hook {hook!r} has zero-length vectors")
 
             normalized[hook] = norm_layers
+            total_vectors += len(norm_layers)
 
         object.__setattr__(self, "vectors", normalized)
+
+        if self.scales is not None:
+            if not isinstance(self.scales, Sequence) or isinstance(
+                self.scales, (str, bytes)
+            ):
+                raise SteeringSpecError(
+                    "SteeringSpec.scales must be a sequence of floats or None"
+                )
+            scales = tuple(float(x) for x in self.scales)
+            if len(scales) != total_vectors:
+                raise SteeringSpecError(
+                    f"SteeringSpec.scales has {len(scales)} entries but the spec "
+                    f"has {total_vectors} vectors; lengths must match"
+                )
+            if any(not math.isfinite(x) for x in scales):
+                raise SteeringSpecError("SteeringSpec.scales must all be finite")
+            object.__setattr__(self, "scales", scales)
 
     # -- constructors --------------------------------------------------------
 
@@ -132,6 +161,37 @@ class SteeringSpec:
             for hook, layers in self.vectors.items()
         }
 
+    # -- per-row scales (serving) --------------------------------------------
+
+    def num_vectors(self) -> int:
+        """Total vector count across all hooks/layers (the ``scales`` length)."""
+        return sum(len(layers) for layers in self.vectors.values())
+
+    def scales_for(self, hook: str) -> tuple[float, ...] | None:
+        """The ``scales`` slice for ``hook`` in sorted-layer order, or ``None``.
+
+        Canonical row order groups hooks in insertion order and layers ascending,
+        so each hook owns a contiguous slice of :attr:`scales`.
+        """
+        if hook not in self.vectors:
+            raise SteeringSpecError(f"unknown hook {hook!r}; have {self.hooks()}")
+        if self.scales is None:
+            return None
+        offset = 0
+        for h, layers in self.vectors.items():
+            n = len(layers)
+            if h == hook:
+                return self.scales[offset : offset + n]
+            offset += n
+        return None  # pragma: no cover - hook membership checked above
+
+    def with_scales(self, scales: Sequence[float] | None) -> SteeringSpec:
+        """Return a copy carrying ``scales`` (validated on construction)."""
+        return SteeringSpec(
+            vectors=self.to_vector_dict(),
+            scales=tuple(float(x) for x in scales) if scales is not None else None,
+        )
+
 
 @dataclass(frozen=True)
 class NamedModuleRef:
@@ -156,6 +216,32 @@ class NamedModuleRef:
                 f"NamedModuleRef.scale must be finite, got {self.scale!r}"
             )
         object.__setattr__(self, "scale", scale)
+
+
+@dataclass(frozen=True)
+class PhaseSteeringSpec:
+    """A steering module split by inference phase, for serving registration.
+
+    The online-serving register endpoint accepts distinct vectors for the
+    prefill and decode phases (the ``{vectors, prefill_vectors, decode_vectors}``
+    payload).  This small companion type bundles the shared ``base`` spec with
+    optional ``prefill`` / ``decode`` variants so a single value maps cleanly to
+    that payload.  ``prefill`` / ``decode`` default to ``None`` (use ``base`` for
+    every phase), keeping the common single-spec case a one-liner.
+    """
+
+    base: SteeringSpec
+    prefill: SteeringSpec | None = None
+    decode: SteeringSpec | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.base, SteeringSpec):
+            raise SteeringSpecError("PhaseSteeringSpec.base must be a SteeringSpec")
+        for label, variant in (("prefill", self.prefill), ("decode", self.decode)):
+            if variant is not None and not isinstance(variant, SteeringSpec):
+                raise SteeringSpecError(
+                    f"PhaseSteeringSpec.{label} must be a SteeringSpec or None"
+                )
 
 
 # What an engine is asked to apply for a request: an inline spec, a named
