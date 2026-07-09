@@ -17,8 +17,6 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
 
 def load_throughput_results(results_dir: Path, tags: list[str] | None) -> list[dict]:
     """Load all vllm.throughput JSON records, optionally filtered by tag."""

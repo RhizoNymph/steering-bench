@@ -19,24 +19,16 @@ from __future__ import annotations
 
 import argparse
 import gc
-import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import random_steering_vectors
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-}
 
 
 def make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
@@ -154,7 +146,22 @@ def main():
             "more realistic worst case for personalization-style workloads."
         ),
     )
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. This sweep exercises the vLLM-fork steering "
+             "populate/submission path; only --engine vllm is supported "
+             "(no engine-agnostic equivalent).",
+    )
     args = parser.parse_args()
+
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this script measures the "
+            "vLLM-fork steering per-step overhead, which has no engine-agnostic "
+            "equivalent. Use --engine vllm."
+        )
 
     max_tokens_list = [int(x) for x in args.max_tokens_list.split(",")]
     num_active_list = [int(x) for x in args.num_active_list.split(",")]
@@ -165,9 +172,8 @@ def main():
                 f"--num-active-list contains {n} > --batch-size {args.batch_size}"
             )
 
-    model_config = MODEL_CONFIGS.get(
-        args.model, {"hidden_size": 2560, "num_layers": 34}
-    )
+    model_config = get_model_config(args.model)
+    engine_identity = VllmSteeringEngine().identity()
 
     from vllm import LLM, SamplingParams
 
@@ -190,8 +196,8 @@ def main():
     if args.distinct_vectors and max_active > 0:
         vector_pool = [
             random_steering_vectors(
-                hidden_size=model_config["hidden_size"],
-                num_layers=model_config["num_layers"],
+                hidden_size=model_config.hidden_size,
+                num_layers=model_config.num_layers,
                 hook_points=["post_block"],
                 scale=0.1,
                 seed=42 + i,
@@ -200,8 +206,8 @@ def main():
         ]
     else:
         shared = random_steering_vectors(
-            hidden_size=model_config["hidden_size"],
-            num_layers=model_config["num_layers"],
+            hidden_size=model_config.hidden_size,
+            num_layers=model_config.num_layers,
             hook_points=["post_block"],
             scale=0.1,
             seed=42,
@@ -271,6 +277,7 @@ def main():
                     },
                     output_dir=args.output_dir,
                     tag=args.tag,
+                    engine=engine_identity,
                 )
             except torch.cuda.OutOfMemoryError:
                 print(

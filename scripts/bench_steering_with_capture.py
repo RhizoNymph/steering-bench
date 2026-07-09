@@ -41,7 +41,6 @@ import gc
 import os
 import sys
 import time
-from pathlib import Path
 
 # Force vLLM to run the engine core in-process. The default forks a
 # subprocess after the parent has touched CUDA (we call
@@ -51,8 +50,6 @@ from pathlib import Path
 # profile_steering.py / bench_capture_plugin_work.py.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
 import torch
 
 from steering_bench.capture_consumers.runner import run_in_subprocess
@@ -60,20 +57,14 @@ from steering_bench.engine.base import SteeringConfig
 from steering_bench.engine.capture import CaptureConsumerSpec
 from steering_bench.engine.engines.vllm import VllmSteeringEngine
 from steering_bench.engine.spec import GenerationRequest, RequestCapture, SteeringSpec
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import (
     random_steering_vectors,
     random_steering_vectors_diverse,
 )
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-    "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
-}
 
 STEERING_MODES = ("disabled", "enabled_idle", "per_request_1", "per_request_4")
 CAPTURE_MODES = ("cap_off", "cap_on_idle", "cap_on_active")
@@ -358,22 +349,34 @@ def main():
         help="Per-cell subprocess wall-clock budget in seconds.",
     )
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. This matrix exercises the vLLM-fork "
+             "capture-consumer plugin system on the steering hot path; only "
+             "--engine vllm is supported. For the engine-agnostic "
+             "capture-overhead sweep use `python -m steering_bench run capture`.",
+    )
     args = parser.parse_args()
+
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this script measures the "
+            "vLLM-fork capture-consumer plugin overhead, which has no "
+            "engine-agnostic equivalent. Use --engine vllm, or "
+            "`python -m steering_bench run capture` for the portable subset."
+        )
 
     if not torch.cuda.is_available():
         print("ERROR: CUDA required")
         sys.exit(1)
 
-    model_cfg = MODEL_CONFIGS.get(args.model)
-    if model_cfg is None:
-        print(
-            f"Warning: unknown model {args.model}, defaulting to "
-            "hidden_size=2560 num_layers=34"
-        )
-        model_cfg = {"hidden_size": 2560, "num_layers": 34}
-    hidden_size = model_cfg["hidden_size"]
-    num_layers = model_cfg["num_layers"]
+    model_cfg = get_model_config(args.model)
+    hidden_size = model_cfg.hidden_size
+    num_layers = model_cfg.num_layers
     capture_layer = min(args.capture_layer, num_layers - 1)
+    engine_identity = VllmSteeringEngine().identity()
 
     steering_modes = [m for m in args.steering_modes.split(",") if m]
     capture_modes = [m for m in args.capture_modes.split(",") if m]
@@ -485,6 +488,7 @@ def main():
                     output_dir=args.output_dir,
                     tag=args.tag,
                     raw_samples_ms=result.get("samples_ms"),
+                    engine=engine_identity,
                 )
                 all_results.append({
                     "steering_mode": steering_mode,

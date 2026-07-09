@@ -29,17 +29,10 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import ModelConfigError, get_model_config
 from steering_bench.vectors import random_steering_vectors
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-}
 
 
 def generate(llm, prompt: str, sp) -> tuple[str, tuple[int, ...]]:
@@ -176,14 +169,29 @@ def main() -> int:
     parser.add_argument("--max-steering-configs", type=int, default=4)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. These checks assert vLLM-fork steering "
+             "behavior (prefill steering, prefix-cache key separation); only "
+             "--engine vllm is supported (no engine-agnostic equivalent).",
+    )
     args = parser.parse_args()
 
-    cfg = MODEL_CONFIGS.get(args.model)
-    if cfg is None:
+    if args.engine != "vllm":
         print(
-            f"ERROR: unknown model {args.model}; add it to MODEL_CONFIGS",
+            f"ERROR: engine {args.engine!r} not supported: these checks assert "
+            "vLLM-fork steering behavior with no engine-agnostic equivalent. "
+            "Use --engine vllm.",
             file=sys.stderr,
         )
+        return 2
+
+    try:
+        cfg = get_model_config(args.model)
+    except ModelConfigError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
     from vllm import LLM
@@ -209,7 +217,7 @@ def main() -> int:
     for name, fn in checks:
         print(f"\n[{name}]")
         try:
-            fn(llm, cfg["hidden_size"], cfg["num_layers"])
+            fn(llm, cfg.hidden_size, cfg.num_layers)
         except AssertionError as e:
             print(f"  FAIL  {name}: {e}")
             failures += 1

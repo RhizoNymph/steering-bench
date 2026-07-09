@@ -67,12 +67,11 @@ os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 # unrelated to steering. Harmless elsewhere.
 os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
 from steering_bench.engine.base import SteeringConfig
 from steering_bench.engine.capture import CaptureConsumerSpec
 from steering_bench.engine.engines.vllm import VllmSteeringEngine
 from steering_bench.engine.spec import GenerationRequest
+from steering_bench.harness.args import engine_names
 
 # Arm -> (enable_steering, enable_row_monitor). The consumer entry-point name
 # is always ``"bench_" + arm``.
@@ -450,11 +449,27 @@ def main() -> None:
                              "the cleaner fix)")
     parser.add_argument("--output-dir", default="results/dynamic_steering/")
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. The dynamic-steering tiers (action queue, "
+             "in-graph row monitor, dynamic-override pool) are vLLM-fork "
+             "internals with no cross-engine analog; only --engine vllm is "
+             "supported.",
+    )
     # Internal single-cell mode.
     parser.add_argument("--cell", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--arm", help=argparse.SUPPRESS)
     parser.add_argument("--batch-size", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: the dynamic-steering tiers "
+            "are vLLM-fork internals with no cross-engine analog. Use "
+            "--engine vllm."
+        )
 
     if args.cell:
         result = _run_cell(args)
@@ -469,6 +484,9 @@ def main() -> None:
     from steering_bench.output import write_result
 
     vllm_commit = args.vllm_commit or _detect_vllm_commit()
+    engine_identity = VllmSteeringEngine().identity()
+    if vllm_commit:
+        engine_identity = {**engine_identity, "commit": vllm_commit}
     batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
     arms = [a for a in ARM_ORDER if a in set(args.arms.split(","))] if args.arms else ARM_ORDER
     resolved_layers = resolve_layers(args.steer_layers, args.num_model_layers)
@@ -526,6 +544,7 @@ def main() -> None:
                 results={k: v for k, v in r.items() if k not in ("arm",)},
                 output_dir=args.output_dir,
                 tag=args.tag,
+                engine=engine_identity,
             )
             all_results.append(r)
         print()

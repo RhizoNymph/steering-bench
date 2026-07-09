@@ -39,18 +39,18 @@ from __future__ import annotations
 
 import argparse
 import gc
-import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch  # noqa: F401  imported for cuda OOM exception class
+
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
 
 # Reuse the throughput primitive — gives both latency and tokens/sec
-# per cell for free, sharing the LLM-init cost.
+# per cell for free, sharing the LLM-init cost.  Resolved from the script
+# directory, which Python places on sys.path[0] when this file is run.
 from bench_throughput import run_throughput  # type: ignore[import-not-found]
 
 # ---------------------------------------------------------------------------
@@ -102,15 +102,6 @@ PRESETS: dict[str, dict[str, list]] = {
         "num_layers_steered_list": [8, None],
         "prompt_lens": [64, 256, 1024],
     },
-}
-
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-    "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
 }
 
 
@@ -188,7 +179,24 @@ def main() -> None:
              "without running.",
     )
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. This cross-product exercises the vLLM-fork "
+             "steering modes (named_shared, inline_unique, per_request_N); "
+             "only --engine vllm is supported. For an engine-agnostic sweep "
+             "use `python -m steering_bench run throughput --mode ...`.",
+    )
     args = parser.parse_args()
+
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this script sweeps "
+            "vLLM-fork steering modes with no engine-agnostic equivalent. Use "
+            "--engine vllm, or `python -m steering_bench run throughput` for "
+            "the portable subset."
+        )
 
     preset = PRESETS[args.preset]
     modes = (
@@ -212,9 +220,8 @@ def main() -> None:
         else preset["prompt_lens"]
     )
 
-    config = MODEL_CONFIGS.get(
-        args.model, {"hidden_size": 2560, "num_layers": 34}
-    )
+    config = get_model_config(args.model)
+    engine_identity = VllmSteeringEngine().identity()
 
     # Build the cell list.  Skip combinations that would generate zero
     # additional information (e.g. layer-subset variation in a non-steering
@@ -281,8 +288,8 @@ def main() -> None:
                 mode=cell["mode"],
                 warmup=args.warmup,
                 iters=args.iters,
-                hidden_size=config["hidden_size"],
-                num_layers=config["num_layers"],
+                hidden_size=config.hidden_size,
+                num_layers=config.num_layers,
                 max_steering_configs_override=args.max_steering_configs,
                 enable_prefix_caching=not args.disable_prefix_cache,
                 num_hooks=cell["num_hooks"],
@@ -315,7 +322,7 @@ def main() -> None:
             "num_layers_steered": (
                 cell["num_layers_steered"]
                 if cell["num_layers_steered"] is not None
-                else config["num_layers"]
+                else config.num_layers
             ),
             "max_steering_configs_override": args.max_steering_configs,
             "prefix_caching": not args.disable_prefix_cache,
@@ -329,6 +336,7 @@ def main() -> None:
             output_dir=args.output_dir,
             tag=args.tag,
             raw_samples_ms=result.get("samples_ms"),
+            engine=engine_identity,
         )
         summary_rows.append({
             "cell": cell,

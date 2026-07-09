@@ -23,25 +23,17 @@ from __future__ import annotations
 import argparse
 import gc
 import os
-import sys
 from pathlib import Path
 
 # CRITICAL: must be set before importing vllm
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
 import torch
 from torch.profiler import ProfilerActivity, profile
 
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.vectors import random_steering_vectors
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-}
 
 
 def make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
@@ -237,9 +229,24 @@ def main():
         default=0.9,
         help="Passed through to vLLM. Lower if running alongside other GPU workloads.",
     )
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. This profiler traces the vLLM-fork steering op "
+             "in-process; only --engine vllm is supported (no engine-agnostic "
+             "equivalent).",
+    )
     args = parser.parse_args()
 
-    model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this script profiles the "
+            "vLLM-fork steering op, which has no engine-agnostic equivalent. "
+            "Use --engine vllm."
+        )
+
+    model_config = get_model_config(args.model)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -270,8 +277,8 @@ def main():
         mode=mode,
         batch_size=args.batch_size,
         max_tokens=args.max_tokens,
-        hidden_size=model_config["hidden_size"],
-        num_layers=model_config["num_layers"],
+        hidden_size=model_config.hidden_size,
+        num_layers=model_config.num_layers,
     )
 
     data = profile_mode(
