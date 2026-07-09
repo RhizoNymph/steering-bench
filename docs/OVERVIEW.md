@@ -12,6 +12,7 @@ Completely external to the vLLM codebase — vLLM is an optional dependency.
 
 - **Core (`src/steering_bench/`)**: Shared utilities for timing, output, and vector generation. All benchmarks depend on these.
 - **Benchmark Scripts (`scripts/`)**: Plain Python scripts that run individual benchmarks. Each is independently executable.
+- **vLLM-internal suite (`scripts/vllm_internal/`)**: Microbenchmarks that exercise vLLM-fork internals directly (raw steering primitives and the capture-manager hot path) with no model load and no cross-engine analog. Intentionally **outside** the `steering_bench.engine` / `harness` framework — later migration phases and the Tier-3 sweep leave these alone. See `scripts/vllm_internal/README.md`.
 - **Results (`results/`)**: Gitignored directory where benchmark JSON output is written.
 - **Docs (`docs/`)**: Design documents, roadmap, and feature documentation.
 
@@ -37,10 +38,16 @@ All results share a common JSON schema with environment metadata, parameters, an
 - doc: docs/features/core.md
 
 ### micro_benchmarks
-- description: Microbenchmarks for raw steering primitives (op kernel, manager, index building)
-- entry_points: [scripts/bench_steering_op.py, scripts/bench_steering_manager.py, scripts/bench_index_building.py]
+- description: Microbenchmarks for raw steering primitives (op kernel, manager, index building, config hash). Part of the vLLM-internal suite under `scripts/vllm_internal/` — fork-internal, intentionally outside the cross-engine framework.
+- entry_points: [scripts/vllm_internal/bench_steering_op.py, scripts/vllm_internal/bench_steering_manager.py, scripts/vllm_internal/bench_index_building.py, scripts/vllm_internal/bench_hash.py]
 - depends_on: [core]
 - doc: docs/features/micro_benchmarks.md
+
+### vllm_internal_suite
+- description: Fork-internal microbenchmarks (raw steering primitives + capture-manager hot path via `vllm.v1.capture.*`) grouped under `scripts/vllm_internal/`. No model load, no cross-engine analog — deliberately NOT migrated onto `steering_bench.engine`/`harness`, and skipped by the Tier-3 migration sweep.
+- entry_points: [scripts/vllm_internal/bench_steering_op.py, scripts/vllm_internal/bench_steering_manager.py, scripts/vllm_internal/bench_index_building.py, scripts/vllm_internal/bench_hash.py, scripts/vllm_internal/bench_capture_manager.py, scripts/vllm_internal/bench_capture_latency.py, scripts/vllm_internal/bench_capture_plugin_work.py, scripts/vllm_internal/bench_capture_packed.py]
+- depends_on: [core, capture_consumers]
+- doc: scripts/vllm_internal/README.md
 
 ### vllm_benchmarks
 - description: End-to-end vLLM system benchmarks (latency, throughput, memory). As of Phase C the three headline scripts drop the `sys.path` hack, resolve model dims via `harness.models.get_model_config`, take `--engine` (guarded to `vllm` since the modes are fork-specific), and stamp results with the first-class `engine` block. The engine-agnostic subset runs via `python -m steering_bench run latency`.
@@ -85,8 +92,8 @@ All results share a common JSON schema with environment metadata, parameters, an
 - doc: docs/features/analysis.md
 
 ### capture_consumers
-- description: Benchmarks for vLLM's activation capture pipeline — manager overhead (plan build, GPU gather, dispatch) and filesystem writer throughput
-- entry_points: [scripts/bench_capture_e2e.py, scripts/bench_capture_manager.py, scripts/bench_capture_filesystem.py]
+- description: Benchmarks for vLLM's activation capture pipeline — manager overhead (plan build, GPU gather, dispatch) and filesystem writer throughput. The manager-internal micros (`bench_capture_manager.py`, `bench_capture_latency.py`, `bench_capture_plugin_work.py`, `bench_capture_packed.py`) now live in the vLLM-internal suite under `scripts/vllm_internal/`; the public-API capture scripts (`bench_capture_e2e.py`, `bench_capture_filesystem.py`) stay in `scripts/` for Phase-4 migration.
+- entry_points: [scripts/bench_capture_e2e.py, scripts/vllm_internal/bench_capture_manager.py, scripts/bench_capture_filesystem.py]
 - depends_on: [core]
 - doc: docs/features/capture_consumers.md
 

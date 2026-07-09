@@ -42,14 +42,32 @@ drop the `sys.path` hack, and pass `engine=` to `write_result`.
 | `bench_mixed_batch.py` | not-yet | Fork mixed-batch modes; local `MODEL_CONFIGS`. |
 | `bench_table_sizing.py` | not-yet | Fork steering-table sizing; local `MODEL_CONFIGS`. |
 | `bench_serving.py` | not-yet | Online HTTP serving internals; local `MODEL_CONFIGS`; no seam model. |
-| `bench_capture_manager.py` | not-yet | Capture-pipeline manager overhead; local `MODEL_CONFIGS`; capture not in seam. |
-| `bench_steering_with_capture.py` | not-yet | Steering × capture matrix in subprocesses; local `MODEL_CONFIGS`; capture not in seam. |
+| `bench_steering_with_capture.py` | not-yet | Steering × capture matrix in subprocesses; local `MODEL_CONFIGS`; capture not in seam. Public-`LLM(capture_consumers=...)`-driven → Phase 4. |
 | `profile_steering.py` | not-yet | nsys/profiling harness; local `MODEL_CONFIGS`. |
 | `nsys_target.py` | not-yet | nsys profiling target; local `MODEL_CONFIGS`. |
 | `verify_correctness.py` | not-yet | Correctness check, not a perf bench; local `MODEL_CONFIGS`. |
 | `bench_dynamic_steering.py` | not-yet | Dynamic-steering/capture-consumer tiers; fork + entry-point consumers. |
 | `bench_patching_external.py` | not-yet | Cross-library causal-tracing sweep; separate adapter set. |
 | `bench_static_steering.py` | not-yet | Fork static-steering path. |
-| `bench_steering_op.py`, `bench_steering_manager.py`, `bench_index_building.py`, `bench_hash.py` | not-yet | Microbenchmarks of raw steering primitives; no model load, no seam surface. |
-| `bench_capture_*.py` (e2e, filesystem, latency, packed, plugin_work, serving) | not-yet | Capture-pipeline microbenchmarks; capture not modeled by the seam. |
+| `bench_capture_e2e.py`, `bench_capture_filesystem.py`, `bench_capture_serving.py` | not-yet | Public-API / writer capture benchmarks; capture not yet modeled by the seam → Phase 4. |
 | `analyze.py`, `analyze_kernel_isolation.py`, `compare_throughput.py`, `capture_throughput_calc.py`, `migrate_throughput_keys.py`, `nsys_steering_cell.py`, `rescale_clocks.py` | n/a | Analysis / tooling / profiling helpers — no model dims, no result writing, or already consume the shared schema. |
+
+## vLLM-internal suite (intentionally not migrated)
+
+Carved into `scripts/vllm_internal/` (Phase 1). These exercise vLLM-fork
+internals directly — raw steering primitives and the capture-manager hot path
+(`vllm.v1.capture.*`) — with **no model load and no cross-engine analog**. They
+are deliberately **outside** the `steering_bench.engine` / `harness` framework
+and are NOT candidates for the Tier-3 migration sweep; the `--engine` / seam
+columns do not apply. See `scripts/vllm_internal/README.md`.
+
+| Script | Fork internal measured |
+|--------|------------------------|
+| `vllm_internal/bench_steering_op.py` | Steering op kernel latency (`torch.ops.vllm.apply_steering` / reference impl). |
+| `vllm_internal/bench_steering_manager.py` | `SteeringManager` Python-side overhead. |
+| `vllm_internal/bench_index_building.py` | `steering_index` CPU construction loop. |
+| `vllm_internal/bench_hash.py` | `hash_steering_config` cost (no argparse; runs on import). |
+| `vllm_internal/bench_capture_manager.py` | `CaptureManager` plan build / GPU gather / dispatch. |
+| `vllm_internal/bench_capture_latency.py` | Capture delivery latency (microbench + e2e). |
+| `vllm_internal/bench_capture_plugin_work.py` | Per-chunk plugin work budget (microbench + e2e). |
+| `vllm_internal/bench_capture_packed.py` | `per_file` vs `packed` filesystem-consumer layout throughput. |
