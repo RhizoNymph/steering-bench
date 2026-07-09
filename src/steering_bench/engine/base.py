@@ -105,6 +105,12 @@ class Capabilities:
     #: subprocess API server + async streaming completions). Additive; the vLLM
     #: serving adapter is the sole implementer today.
     serving: bool = False
+    #: Exposes an activation-patching / causal-tracing sweep (the
+    #: ``PatchSweepEngine`` seam: patch the clean run's residual into the corrupt
+    #: run at every ``(layer, position)`` cell and grade the answer token). A
+    #: distinct axis from generate / capture / serving; the TransformerLens and
+    #: vLLM patch-sweep adapters implement it.
+    patch_sweep: bool = False
 
     def satisfies(self, required: Capabilities) -> bool:
         """True if ``self`` provides every capability ``required`` demands.
