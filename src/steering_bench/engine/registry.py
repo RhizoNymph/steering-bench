@@ -53,6 +53,58 @@ ENGINE_REGISTRY: list[EngineEntry] = [
             capture=False,
         ),
     ),
+    EngineEntry(
+        name="hf_baseline",
+        required_package="transformers",
+        module_path="steering_bench.engine.engines.hf",
+        class_name="HFSteeringEngine",
+        capabilities=Capabilities(
+            batching=True,
+            named_modules=False,
+            multi_layer=False,
+            multi_hook=False,
+            capture=False,
+        ),
+    ),
+    EngineEntry(
+        name="nnsight",
+        required_package="nnsight",
+        module_path="steering_bench.engine.engines.nnsight",
+        class_name="NnsightSteeringEngine",
+        capabilities=Capabilities(
+            batching=True,
+            named_modules=False,
+            multi_layer=False,
+            multi_hook=False,
+            capture=False,
+        ),
+    ),
+    EngineEntry(
+        name="repeng",
+        required_package="repeng",
+        module_path="steering_bench.engine.engines.repeng",
+        class_name="RepengSteeringEngine",
+        capabilities=Capabilities(
+            batching=False,
+            named_modules=False,
+            multi_layer=True,
+            multi_hook=False,
+            capture=False,
+        ),
+    ),
+    EngineEntry(
+        name="pyvene",
+        required_package="pyvene",
+        module_path="steering_bench.engine.engines.pyvene",
+        class_name="PyveneSteeringEngine",
+        capabilities=Capabilities(
+            batching=False,
+            named_modules=False,
+            multi_layer=False,
+            multi_hook=False,
+            capture=False,
+        ),
+    ),
 ]
 
 

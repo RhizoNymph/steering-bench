@@ -68,14 +68,14 @@ All results share a common JSON schema with environment metadata, parameters, an
 - doc: docs/features/ablation_benchmarks.md
 
 ### external_comparison
-- description: Cross-library steering performance comparison (TransformerLens, nnsight, repeng, pyvene vs vLLM). `scripts/bench_external.py` keeps the broader per-library `external/` adapter set (dims now from `harness.models`, each result stamped with an `engine` block = library name). Its engine-seam-native successor is the `external-comparison` harness benchmark: `python -m steering_bench run external-comparison`.
-- entry_points: [scripts/bench_external.py, src/steering_bench/harness/benchmarks/external_comparison.py]
+- description: Cross-library steering performance comparison (TransformerLens, nnsight, repeng, pyvene, HF baseline vs vLLM), now fully seam-native. Every library is a `SteeringEngine` adapter under `engine/engines/`, so `python -m steering_bench run external-comparison` runs the same steered workload across all discovered engines. `--batch-size 1` is the Tier-1 single-request comparison; `--batch-size N` is the Tier-2 batched comparison (adds `req_per_sec`/`avg_per_request_ms`). The old `external/base.py::SteeringBenchmark` protocol and per-library adapters were retired; `scripts/bench_external.py` is a thin deprecation shim forwarding to the CLI.
+- entry_points: [src/steering_bench/harness/benchmarks/external_comparison.py, scripts/bench_external.py]
 - depends_on: [core, engine_abstraction, harness]
 - doc: docs/features/external_comparison.md
 
 ### engine_abstraction
-- description: Typed engine seam — a `SteeringEngine` ABC with a `Capabilities` descriptor, a canonical `SteeringSpec`/`NamedModuleRef` domain model, a capability-aware engine registry, and vLLM + TransformerLens adapters. Lets a new engine be one adapter class and lets the registry filter engines by required capabilities. Additive in Phase A; migrating existing scripts onto this seam is Phase B/C.
-- entry_points: [src/steering_bench/engine/spec.py, src/steering_bench/engine/base.py, src/steering_bench/engine/registry.py, src/steering_bench/engine/engines/vllm.py, src/steering_bench/engine/engines/transformerlens.py]
+- description: Typed engine seam — a `SteeringEngine` ABC with a `Capabilities` descriptor, a canonical `SteeringSpec`/`NamedModuleRef` domain model, a capability-aware engine registry, and six adapters: vLLM, TransformerLens, HF baseline, nnsight, repeng, pyvene. Lets a new engine be one adapter class and lets the registry filter engines by required capabilities. `GenerationResult.output_tokens_exact` flags whether a per-request token count is exact (nnsight's pseudo-batch sets it False). GPU helpers (`gpu_memory_mb`/`cleanup_gpu`/`is_library_available`) live in `engine/base.py`.
+- entry_points: [src/steering_bench/engine/spec.py, src/steering_bench/engine/base.py, src/steering_bench/engine/registry.py, src/steering_bench/engine/engines/vllm.py, src/steering_bench/engine/engines/transformerlens.py, src/steering_bench/engine/engines/hf.py, src/steering_bench/engine/engines/nnsight.py, src/steering_bench/engine/engines/repeng.py, src/steering_bench/engine/engines/pyvene.py]
 - depends_on: [core]
 - doc: docs/features/engine_abstraction.md
 
