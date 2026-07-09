@@ -12,10 +12,12 @@ from __future__ import annotations
 from typing import Any
 
 from steering_bench.engine.base import Capabilities, SteeringConfig, SteeringEngine
+from steering_bench.engine.capture import CaptureConsumerSpec, capture_consumers_arg
 from steering_bench.engine.spec import (
     GenerationRequest,
     GenerationResult,
     NamedModuleRef,
+    RequestCapture,
     Steering,
     SteeringSpec,
 )
@@ -97,6 +99,17 @@ def steering_kwargs(steering: Steering) -> dict[str, Any]:
     raise TypeError(f"unsupported steering type: {type(steering)!r}")
 
 
+def capture_kwargs(capture: RequestCapture | None) -> dict[str, Any]:
+    """Map a request's per-request capture opt-in to ``SamplingParams`` kwargs.
+
+    ``None`` -> no ``capture`` key (unaffected request); otherwise the nested
+    ``{consumer: {...}}`` dict the fork's ``SamplingParams.capture`` expects. Pure.
+    """
+    if capture is None:
+        return {}
+    return {"capture": capture.to_capture_field()}
+
+
 class VllmSteeringEngine(SteeringEngine):
     """Adapter over the vLLM steering fork's ``LLM`` batch API."""
 
@@ -113,6 +126,7 @@ class VllmSteeringEngine(SteeringEngine):
 
     def __init__(self) -> None:
         self._llm: Any | None = None
+        self._capture_specs: list[CaptureConsumerSpec] = []
 
     def load(
         self,
@@ -131,7 +145,38 @@ class VllmSteeringEngine(SteeringEngine):
             "enable_prefix_caching": cfg.enable_prefix_caching,
             **opts,
         }
+        consumers = capture_consumers_arg(self._capture_specs)
+        if consumers is not None:
+            load_opts["capture_consumers"] = consumers
         self._llm = LLM(model=model_id, **load_opts)
+
+    def _collective_rpc(self, method: str) -> Any:
+        """Call a worker collective RPC, preferring the ``LLM`` passthrough."""
+        if self._llm is None:
+            raise RuntimeError("VllmSteeringEngine collective_rpc before load()")
+        rpc = getattr(self._llm, "collective_rpc", None)
+        if rpc is None:
+            rpc = self._llm.llm_engine.collective_rpc
+        return rpc(method)
+
+    # -- capture (CaptureEngine surface) -------------------------------------
+
+    def configure_capture(self, specs: list[CaptureConsumerSpec]) -> None:
+        """Store capture-consumer specs to install at the next ``load``."""
+        self._capture_specs = list(specs)
+
+    def capture_status(self) -> list[dict[str, Any]]:
+        """Per-worker ``get_dynamic_steering_status`` payloads (one per worker)."""
+        res = self._collective_rpc("get_dynamic_steering_status")
+        return list(res) if isinstance(res, (list, tuple)) else [res]
+
+    def live_capture_consumers(self) -> list[Any]:
+        """Live bench capture-consumer instances in this process (mp=0)."""
+        from steering_bench.capture_consumers.bench_consumers import (
+            iter_live_consumers,
+        )
+
+        return iter_live_consumers()
 
     def register_module(
         self,
@@ -167,6 +212,7 @@ class VllmSteeringEngine(SteeringEngine):
                     max_tokens=req.max_tokens,
                     temperature=0.0,
                     **steering_kwargs(req.steering),
+                    **capture_kwargs(req.capture),
                 )
             )
 

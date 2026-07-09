@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from steering_bench.harness.benchmark import Benchmark
+from steering_bench.harness.benchmarks.capture import CaptureBenchmark
 from steering_bench.harness.benchmarks.external_comparison import (
     ExternalComparisonBenchmark,
 )
@@ -13,6 +14,7 @@ BENCHMARK_REGISTRY: dict[str, type[Benchmark]] = {
     "latency": LatencyBenchmark,
     "throughput": ThroughputBenchmark,
     "external-comparison": ExternalComparisonBenchmark,
+    "capture": CaptureBenchmark,
 }
 
 

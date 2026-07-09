@@ -56,6 +56,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import torch
 
 from steering_bench.capture_consumers.runner import run_in_subprocess
+from steering_bench.engine.base import SteeringConfig
+from steering_bench.engine.capture import CaptureConsumerSpec
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.engine.spec import GenerationRequest, RequestCapture, SteeringSpec
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import (
@@ -84,8 +88,8 @@ def _build_capture_consumers(
     capture_mode: str,
     capture_layer: int,
     fs_root: str | None,
-) -> list[dict] | None:
-    """Translate ``capture_mode`` into the LLM(capture_consumers=...) value.
+) -> list[CaptureConsumerSpec]:
+    """Translate ``capture_mode`` into a CaptureEngine consumer-spec list.
 
     Uses the filesystem consumer because it has ``reads_client_spec=True``,
     so per-request capture admission actually succeeds. The logging consumer
@@ -93,29 +97,26 @@ def _build_capture_consumers(
     ``cap_on_active``, collapsing it into ``cap_on_idle``.
     """
     if capture_mode == "cap_off":
-        return None
+        return []
     if fs_root is None:
         raise ValueError("filesystem root required for cap_on_* modes")
     return [
-        {
-            "name": "filesystem",
-            "params": {
-                "root": fs_root,
-                "writer_threads": 4,
-            },
-        }
+        CaptureConsumerSpec(
+            name="filesystem",
+            params={"root": fs_root, "writer_threads": 4},
+        )
     ]
 
 
 CAPTURE_SPEC_PRESETS = ("minimal", "medium", "heavy")
 
 
-def _build_capture_field(
+def _build_request_capture(
     capture_spec: str,
     capture_layer: int,
     num_layers: int,
-) -> dict:
-    """Build the per-request ``capture`` field for the filesystem consumer.
+) -> RequestCapture:
+    """Build the per-request capture opt-in for the filesystem consumer.
 
     Three presets that scale the per-step gather/dispatch work:
 
@@ -143,57 +144,53 @@ def _build_capture_field(
             f"unknown capture_spec preset {capture_spec!r}; "
             f"expected one of {CAPTURE_SPEC_PRESETS}"
         )
-    return {
-        "filesystem": {
-            "request_id": "bench",
-            "tag": "bench",
-            "hooks": hooks,
-            "positions": positions,
-        }
-    }
+    return RequestCapture(
+        consumer="filesystem",
+        hooks=hooks,
+        positions=positions,
+        request_id="bench",
+        tag="bench",
+    )
 
 
-def _build_sampling_params(
+def _build_requests(
     steering_mode: str,
     capture_mode: str,
     capture_spec: str,
-    batch_size: int,
+    prompts: list[str],
     max_tokens: int,
     hidden_size: int,
     num_layers: int,
     capture_layer: int,
-):
-    """Return the sampling-params list for one (steering, capture) cell."""
-    from vllm import SamplingParams
-
-    capture_field = None
+) -> list[GenerationRequest]:
+    """Return the request batch for one (steering, capture) cell."""
+    capture = None
     if capture_mode == "cap_on_active":
-        capture_field = _build_capture_field(
+        capture = _build_request_capture(
             capture_spec=capture_spec,
             capture_layer=capture_layer,
             num_layers=num_layers,
         )
 
-    def _sp(steering_kwargs: dict | None = None):
-        kw = dict(max_tokens=max_tokens, temperature=0.0)
-        if steering_kwargs:
-            kw.update(steering_kwargs)
-        if capture_field is not None:
-            kw["capture"] = capture_field
-        return SamplingParams(**kw)
+    def _req(prompt: str, steering: SteeringSpec | None) -> GenerationRequest:
+        return GenerationRequest(
+            prompt=prompt, max_tokens=max_tokens, steering=steering, capture=capture
+        )
 
     if steering_mode in ("disabled", "enabled_idle"):
-        return [_sp() for _ in range(batch_size)]
+        return [_req(p, None) for p in prompts]
 
     if steering_mode == "per_request_1":
-        vectors = random_steering_vectors(
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            hook_points=["post_block"],
-            scale=0.1,
-            seed=42,
+        spec = SteeringSpec.from_vector_dict(
+            random_steering_vectors(
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                hook_points=["post_block"],
+                scale=0.1,
+                seed=42,
+            )
         )
-        return [_sp({"steering_vectors": vectors}) for _ in range(batch_size)]
+        return [_req(p, spec) for p in prompts]
 
     if steering_mode == "per_request_4":
         diverse = random_steering_vectors_diverse(
@@ -204,10 +201,8 @@ def _build_sampling_params(
             scale=0.1,
             base_seed=42,
         )
-        return [
-            _sp({"steering_vectors": diverse[i % 4]})
-            for i in range(batch_size)
-        ]
+        specs = [SteeringSpec.from_vector_dict(d) for d in diverse]
+        return [_req(p, specs[i % 4]) for i, p in enumerate(prompts)]
 
     raise ValueError(f"unknown steering mode: {steering_mode}")
 
@@ -233,8 +228,6 @@ def _run_cell(
     """Run a single (steering, capture, batch_size) cell. Picklable for spawn."""
     import tempfile
 
-    from vllm import LLM
-
     enable_steering = steering_mode != "disabled"
     max_configs = 8 if steering_mode == "per_request_4" else 4
 
@@ -244,29 +237,32 @@ def _run_cell(
         fs_tmpdir = tempfile.TemporaryDirectory(prefix="bench-capture-")
         fs_root = fs_tmpdir.name
 
-    capture_consumers = _build_capture_consumers(capture_mode, capture_layer, fs_root)
+    specs = _build_capture_consumers(capture_mode, capture_layer, fs_root)
 
     print(
         f"    [load] steering={enable_steering} max_configs={max_configs} "
         f"capture={capture_mode} prefix_cache={enable_prefix_caching}",
         flush=True,
     )
-    llm = LLM(
-        model=model,
-        enable_steering=enable_steering,
-        max_steering_configs=max_configs,
-        capture_consumers=capture_consumers,
-        enable_prefix_caching=enable_prefix_caching,
+    engine = VllmSteeringEngine()
+    engine.configure_capture(specs)
+    engine.load(
+        model,
+        steering_config=SteeringConfig(
+            enable_steering=enable_steering,
+            max_steering_configs=max_configs,
+            enable_prefix_caching=enable_prefix_caching,
+        ),
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len,
     )
 
     prompts = _make_prompts(batch_size, prompt_len)
-    sp_list = _build_sampling_params(
+    requests = _build_requests(
         steering_mode=steering_mode,
         capture_mode=capture_mode,
         capture_spec=capture_spec,
-        batch_size=batch_size,
+        prompts=prompts,
         max_tokens=max_tokens,
         hidden_size=hidden_size,
         num_layers=num_layers,
@@ -276,12 +272,12 @@ def _run_cell(
     print(f"    [measure] warmup={warmup} iters={iters}", flush=True)
     try:
         for _ in range(warmup):
-            llm.generate(prompts, sp_list)
+            engine.generate(requests)
         samples = []
         for _ in range(iters):
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            llm.generate(prompts, sp_list)
+            engine.generate(requests)
             torch.cuda.synchronize()
             samples.append((time.perf_counter() - t0) * 1000.0)
         stats = compute_stats(samples)
@@ -289,7 +285,7 @@ def _run_cell(
     except torch.cuda.OutOfMemoryError:
         return {"error": "OOM", "samples_ms": []}
     finally:
-        del llm
+        engine.teardown()
         gc.collect()
         torch.cuda.empty_cache()
         if fs_tmpdir is not None:

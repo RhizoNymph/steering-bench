@@ -21,7 +21,7 @@ from typing import Any, ClassVar
 
 import torch
 
-from steering_bench.engine.base import SteeringConfig, SteeringEngine
+from steering_bench.engine.base import Capabilities, SteeringConfig, SteeringEngine
 from steering_bench.engine.spec import GenerationRequest
 from steering_bench.output import print_result_summary, write_result
 from steering_bench.timing import TimingStats, compute_stats
@@ -59,6 +59,11 @@ class Benchmark(abc.ABC):
     #: When True, the CLI runs this benchmark across every discovered engine and
     #: tabulates a comparison rather than running a single ``--engine``.
     is_comparison: ClassVar[bool] = False
+    #: Capabilities an engine must advertise to run this benchmark. The CLI gates
+    #: engine selection on it via ``discover(required=...)`` -- e.g. the capture
+    #: benchmark sets ``Capabilities(capture=True)`` so only capture-capable
+    #: engines are selected.
+    required_capabilities: ClassVar[Capabilities] = Capabilities()
 
     def __init__(
         self, engine: SteeringEngine, config: BenchmarkConfig, **options: Any
@@ -104,10 +109,23 @@ class Benchmark(abc.ABC):
         """Typed load-time steering config. Default: ``None`` (engine default)."""
         return None
 
+    def before_load(self) -> None:
+        """Hook run once before ``load``. Default: no-op.
+
+        Used by the capture benchmark to declare capture consumers via
+        ``engine.configure_capture(...)`` so they are installed at load.
+        """
+
     def after_load(self) -> None:
         """Hook run once after ``load`` and before warmup. Default: no-op.
 
         Used by mode benchmarks to register named steering modules.
+        """
+
+    def after_teardown(self) -> None:
+        """Hook run once after ``teardown``. Default: no-op.
+
+        Used to clean up per-run resources (e.g. a capture-sink tempdir).
         """
 
     def extra_results(
@@ -125,6 +143,7 @@ class Benchmark(abc.ABC):
 
         steering_config = self.steering_config()
         load_opts = self.load_opts()
+        self.before_load()
         if steering_config is not None:
             self.engine.load(
                 self.config.model, steering_config=steering_config, **load_opts
@@ -152,6 +171,7 @@ class Benchmark(abc.ABC):
                 )
         finally:
             self.engine.teardown()
+            self.after_teardown()
 
         stats = compute_stats(samples_ms)
         avg_output_tokens = (

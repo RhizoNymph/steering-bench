@@ -164,17 +164,83 @@ Steering = SteeringSpec | NamedModuleRef | None
 
 
 @dataclass(frozen=True)
+class RequestCapture:
+    """Per-request capture opt-in (the ``SamplingParams(capture=...)`` shape).
+
+    A request that carries a ``RequestCapture`` asks a specific capture consumer
+    (by ``consumer`` name, e.g. ``"filesystem"``) to materialize activations at
+    ``hooks`` / ``positions`` for this request only. Consumers with
+    ``reads_client_spec=True`` (the filesystem consumer) require this per-request
+    opt-in; global-only consumers ignore it. Requests without a ``capture`` field
+    are unaffected.
+
+    ``to_capture_field`` produces the nested ``{consumer: {...}}`` dict the vLLM
+    fork's ``SamplingParams.capture`` expects. Pure: no vllm import.
+    """
+
+    consumer: str
+    hooks: dict[str, list[int]]
+    positions: str = "last_prompt"
+    request_id: str = "bench"
+    tag: str = "bench"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.consumer, str) or not self.consumer.strip():
+            raise SteeringSpecError("RequestCapture.consumer must be a non-empty str")
+        if not isinstance(self.hooks, Mapping) or not self.hooks:
+            raise SteeringSpecError(
+                "RequestCapture.hooks must be a non-empty mapping of hook -> [layers]"
+            )
+        norm: dict[str, list[int]] = {}
+        for hook, layers in self.hooks.items():
+            if not isinstance(hook, str) or not hook:
+                raise SteeringSpecError(
+                    f"RequestCapture hook must be a non-empty str, got {hook!r}"
+                )
+            if not isinstance(layers, Sequence) or isinstance(layers, (str, bytes)):
+                raise SteeringSpecError(
+                    f"RequestCapture hook {hook!r}: layers must be a sequence of ints"
+                )
+            norm[hook] = [int(x) for x in layers]
+        object.__setattr__(self, "hooks", norm)
+        if not isinstance(self.positions, str) or not self.positions:
+            raise SteeringSpecError("RequestCapture.positions must be a non-empty str")
+
+    def to_capture_field(self) -> dict[str, dict]:
+        """The nested ``{consumer: {request_id, tag, hooks, positions}}`` dict."""
+        return {
+            self.consumer: {
+                "request_id": self.request_id,
+                "tag": self.tag,
+                "hooks": {hook: list(layers) for hook, layers in self.hooks.items()},
+                "positions": self.positions,
+            }
+        }
+
+
+@dataclass(frozen=True)
 class GenerationRequest:
-    """A single generation request with optional steering."""
+    """A single generation request with optional steering and capture.
+
+    ``capture`` is the per-request capture opt-in (default ``None`` -- no
+    capture). Non-capturing requests are unaffected; capturing engines translate
+    it to ``SamplingParams(capture=...)``.
+    """
 
     prompt: str
     max_tokens: int
     steering: Steering = None
+    capture: RequestCapture | None = None
 
     def __post_init__(self) -> None:
         if self.max_tokens <= 0:
             raise SteeringSpecError(
                 f"GenerationRequest.max_tokens must be > 0, got {self.max_tokens}"
+            )
+        if self.capture is not None and not isinstance(self.capture, RequestCapture):
+            raise SteeringSpecError(
+                "GenerationRequest.capture must be a RequestCapture or None, got "
+                f"{type(self.capture)!r}"
             )
 
 

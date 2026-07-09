@@ -14,12 +14,16 @@ from __future__ import annotations
 import abc
 import importlib.util
 from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING, Any
 
 from steering_bench.engine.spec import (
     GenerationRequest,
     GenerationResult,
     SteeringSpec,
 )
+
+if TYPE_CHECKING:
+    from steering_bench.engine.capture import CaptureConsumerSpec
 
 
 class EngineError(RuntimeError):
@@ -154,6 +158,42 @@ class SteeringEngine(abc.ABC):
         ``None`` (use ``spec`` for every phase).
         """
         raise EngineError(f"named modules unsupported by {self.name}")
+
+    # -- capture (CaptureEngine surface) -------------------------------------
+    #
+    # Capture is modelled as default-raising methods here (mirroring
+    # ``register_module``) rather than a separate ABC, so that ANY engine
+    # subclass answers ``EngineError`` -- not ``AttributeError`` -- when asked to
+    # capture without the capability. Only engines advertising
+    # ``Capabilities.capture`` override these; the vLLM adapter is the sole
+    # implementer today. Selection is gated via
+    # ``discover(required=Capabilities(capture=True))``.
+
+    def configure_capture(self, specs: list[CaptureConsumerSpec]) -> None:
+        """Declare capture consumers to install at ``load``.
+
+        Call before ``load``: the engine stores the specs and constructs the
+        capture manager (``LLM(capture_consumers=...)``) during ``load``. Default
+        raises ``EngineError``; only capture-capable engines override.
+        """
+        raise EngineError(f"capture unsupported by {self.name}")
+
+    def capture_status(self) -> list[dict[str, Any]]:
+        """Per-worker capture / dynamic-steering status for activation asserts.
+
+        Wraps the fork's ``collective_rpc("get_dynamic_steering_status")`` and
+        returns one dict per worker. Default raises ``EngineError``.
+        """
+        raise EngineError(f"capture unsupported by {self.name}")
+
+    def live_capture_consumers(self) -> list[Any]:
+        """In-process live capture-consumer instances (multiprocessing=0).
+
+        The capture arms have no worker status RPC; with the worker in-process
+        the benchmark reads each consumer's step counters here. Default raises
+        ``EngineError``.
+        """
+        raise EngineError(f"capture unsupported by {self.name}")
 
     @abc.abstractmethod
     def generate(self, requests: list[GenerationRequest]) -> list[GenerationResult]:

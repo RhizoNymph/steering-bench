@@ -50,8 +50,10 @@ measures the in-graph monitor's cost, not a disengaged probe.
 bench_dynamic_steering.py (parent)
   for (arm, batch_size):
     subprocess: bench_dynamic_steering.py --cell --arm A --batch-size N
-      → LLM(model, capture_consumers=<arm spec>, [enable_steering])
-      → warmup × W, then timed generate() × I (wall clock, cuda.synchronize)
+      → VllmSteeringEngine.configure_capture([CaptureConsumerSpec(bench_A, ...)])
+      → engine.load(model, SteeringConfig(enable_steering=...), **fork_opts)
+      → warmup × W, activation gate via engine.capture_status() /
+        engine.live_capture_consumers(), then timed engine.generate() × I
       → print "CELL_RESULT {json}"
     parent parses the line, computes overhead_pct vs the `off` cell,
     write_result(benchmark="steering.dynamic", ...) → results/dynamic_steering/
@@ -61,6 +63,15 @@ bench_dynamic_steering.py (parent)
 Each cell runs in a **fresh subprocess** because the dynamic-steering action
 queue is process-global and vLLM's residual weight memory does not free cleanly
 across `LLM` instances — a subprocess per cell keeps state and memory clean.
+
+**Phase 4 seam usage (partial migration):** consumer declaration is the typed
+`CaptureConsumerSpec`, and LLM construction + activation-status introspection go
+through the CaptureEngine seam (`configure_capture` / `capture_status` /
+`live_capture_consumers`) instead of raw `from vllm import LLM` +
+`collective_rpc`. The subprocess-per-cell orchestration and fork-only load knobs
+(`max_dynamic_steering_configs`, `enable_row_monitor`) stay vLLM-specific;
+`enable_prefix_caching` / `max_steering_configs` follow the `SteeringConfig`
+defaults (True / 4), which match vLLM's defaults.
 
 ## Files
 

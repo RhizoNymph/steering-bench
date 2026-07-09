@@ -20,6 +20,47 @@ delivers them to external consumers (filesystem writers, RL trainers, dashboards
 
 ---
 
+## The capture seam (Phase 4)
+
+Capture is modelled by two seams so the public-API benchmarks no longer inline
+`from vllm import LLM` + config dicts.
+
+### CaptureEngine (`src/steering_bench/engine/`)
+
+- **`CaptureConsumerSpec`** (`engine/capture.py`) — typed, immutable declaration
+  of one capture consumer (`name`, `params={hooks, positions, level}`,
+  `location`, `execution`, `instance_name`, driver-side `instance`).
+  `to_llm_config()` yields the exact `LLM(capture_consumers=[...])` entry (config
+  dict or pass-through instance); `capture_consumers_arg(specs)` builds the whole
+  list (`None` for the no-capture baseline).
+- **`RequestCapture`** (`engine/spec.py`) — the per-request opt-in
+  (`SamplingParams(capture=...)` shape). `GenerationRequest.capture` defaults
+  `None`, so non-capturing requests are unaffected; `to_capture_field()` yields
+  the nested `{consumer: {request_id, tag, hooks, positions}}` dict.
+- **CaptureEngine methods on `SteeringEngine`** (`engine/base.py`, default-raising
+  `EngineError`, mirroring `register_module`): `configure_capture(specs)` (declare
+  consumers to install at load), `capture_status()` (wraps
+  `collective_rpc("get_dynamic_steering_status")`), `live_capture_consumers()`
+  (in-process `iter_live_consumers()` registry). The vLLM adapter
+  (`engine/engines/vllm.py`) is the sole implementer; `load()` passes the
+  configured consumers and `generate()` threads each request's `capture` field
+  into `SamplingParams`.
+- **`capture`-gated discovery** — the pre-existing `Capabilities.capture` flag now
+  gates selection: `discover(required=Capabilities(capture=True))` returns only
+  vLLM. The harness `capture` benchmark sets `required_capabilities` and the CLI
+  threads it into `discover`, so `run capture --engine hf_baseline` is rejected.
+
+### CaptureSink (`engine/capture_sink.py`)
+
+An engine-neutral activation-writer surface: submit `WriteChunk` / `WriteFinalize`
+payloads, wait for finalizes, read a `SinkThroughput` report (MB/s, chunks/s,
+finalize p50/p99) computed by a shared `ThroughputRecorder`. `InMemoryCaptureSink`
+is the fork-free reference (used by tests); `VllmActivationWriterSink` wraps the
+fork's `ActivationWriter` (lazy import). `make_capture_sink(engine, config)` is
+the factory the filesystem benchmark constructs through.
+
+---
+
 ## Scripts
 
 ### `scripts/bench_capture_e2e.py`
@@ -27,10 +68,16 @@ delivers them to external consumers (filesystem writers, RL trainers, dashboards
 **Question answered:** Does enabling capture consumers measurably hurt inference throughput?
 
 **How it works:**
-- Constructs a fresh `LLM` for each consumer configuration
-- Runs `warmup` generate() calls to prime CUDA graphs, then `iters` timed calls
+- Constructs a fresh `VllmSteeringEngine` per config, declaring consumers via
+  `engine.configure_capture([CaptureConsumerSpec(...)])` and loading with steering
+  off (so the baseline is not inflated by the steering subsystem)
+- Builds `GenerationRequest`s (the `filesystem_minimal` config attaches a
+  per-request `RequestCapture`), runs `warmup` `engine.generate()` calls to prime
+  CUDA graphs, then `iters` timed calls
 - Reports tokens/sec and % overhead vs the no-consumer baseline
 - Wall-clock timing with `torch.cuda.synchronize()` barriers
+- The same configs are available seam-native as
+  `python -m steering_bench run capture --capture-config <name>`
 
 **Configurations tested:**
 
@@ -97,11 +144,12 @@ delivers them to external consumers (filesystem writers, RL trainers, dashboards
 **Question answered:** Can the ActivationWriter keep up with the model?
 
 **How it works:**
-- Drives `ActivationWriter` directly (no LLM, no CaptureManager)
-- Submits `num_requests × steps_per_request` WriteTask entries + `num_requests`
-  FinalizeTasks in one pass, waits for all FinalizeTask completions
-- Uses `writer.add_status_callback()` to record exact completion timestamps
-- Computes sustained throughput (MB/s) and finalize latency distribution
+- Constructs a `CaptureSink` via `make_capture_sink("vllm", SinkConfig(...))` —
+  the vLLM sink wraps `ActivationWriter` (no LLM, no CaptureManager)
+- Submits `num_requests × steps_per_request` `WriteChunk` entries + `num_requests`
+  `WriteFinalize`s in one pass, then `sink.wait_for_all(...)`
+- The sink's `ThroughputRecorder` times the run and each finalize; `sink.report()`
+  returns the `SinkThroughput` (MB/s, chunks/s, finalize p50/p99)
 
 **Sweep matrix:**
 
