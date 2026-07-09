@@ -21,6 +21,8 @@ steering-bench = "steering_bench.__main__:main"
 
 [project.optional-dependencies]
 vllm = ["vllm"]
+# The hf_baseline engine loads with device_map="auto", which requires accelerate.
+hf = ["transformers>=4.40", "accelerate>=0.30"]
 transformerlens = ["transformer-lens>=2.0"]
 nnsight = ["nnsight>=0.3"]
 # repeng pins numpy<2 which conflicts with vllm (numpy>=2).
@@ -29,6 +31,8 @@ nnsight = ["nnsight>=0.3"]
 pyvene = ["pyvene>=0.1"]
 # Excludes repeng due to numpy version conflict with vllm.
 all-external = [
+    "transformers>=4.40",
+    "accelerate>=0.30",
     "transformer-lens>=2.0",
     "nnsight>=0.3",
     "pyvene>=0.1",

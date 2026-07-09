@@ -184,6 +184,15 @@ def steering_extra_body(steering: Steering) -> dict[str, Any] | None:
         case SteeringSpec():
             return {"steering_vectors": pack_steering_vectors(steering)}
         case NamedModuleRef():
+            # The HTTP steering path resolves a named module by bare name and
+            # has no field for a reference scale. Refuse rather than silently
+            # apply scale 1.0 (which would understate/overstate the effect).
+            if steering.scale != 1.0:
+                raise ValueError(
+                    "serving named-module references cannot carry a scale "
+                    f"(got scale={steering.scale}); the HTTP path only accepts a "
+                    "bare module name. Bake the scale into the registered module."
+                )
             return {"steering_name": steering.name}
     raise TypeError(f"unsupported steering type: {type(steering)!r}")
 
