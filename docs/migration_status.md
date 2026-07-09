@@ -30,6 +30,22 @@ never hand-encode. `bench_serving.py` is migrated onto it; the `serving` capabil
 was added to `Capabilities`, and `SteeringSpec` gained the Phase-3-deferred per-row
 `scales` + a `PhaseSteeringSpec` companion for phase-split registration.
 
+**Phase 6 (patch-sweep seam):** activation-patching / causal tracing is now a third,
+distinct axis — a `PatchSweepEngine` ABC (`engine/patch_sweep.py`) separate from
+`SteeringEngine` / `ServingEngine` because a denoising sweep returns a whole
+`(layers × positions)` grid reduced to `cells / wall_s / cells_per_s` + an argmax
+cell, not a latency profile. A frozen `PatchSweepResult` is the typed UNION of both
+backends' fields (`noise_floor` / `auto_captured` / `skipped` are vLLM-only, default
+`None` for TransformerLens); pure `from_tl_dict` / `from_vllm_dict` mappers + `to_dict`
+reproduce each backend's original dict exactly. Two adapters wrap the verified
+`external/` modules without rewriting them (`TLPatchSweepEngine` naive+batched,
+`VllmPatchSweepEngine` one-call HTTP); `discover_patch_sweep` skips `tl` when
+`transformer_lens` is absent and always lists `vllm` (server reachability checked at
+`setup`). `Capabilities.patch_sweep` was added; `PatchSweepBenchmark`
+(`harness/benchmarks/patch_sweep.py`, `PATCH_SWEEP_REGISTRY`) drives the comparison;
+CLI `python -m steering_bench run patch-sweep`. `bench_patching_external.py` is migrated
+onto it as a thin driver.
+
 ## Headline scripts (Phase C target)
 
 | Script | Status | Notes |
@@ -64,7 +80,7 @@ drop the `sys.path` hack, and pass `engine=` to `write_result`.
 | `nsys_target.py` | not-yet | nsys profiling target; local `MODEL_CONFIGS`. |
 | `verify_correctness.py` | not-yet | Correctness check, not a perf bench; local `MODEL_CONFIGS`. |
 | `bench_dynamic_steering.py` | partial (Phase 4) | Dynamic-steering/capture-consumer tiers. Consumer declaration is the typed `CaptureConsumerSpec`; LLM construction + activation-status introspection route through the CaptureEngine seam (`configure_capture` / `capture_status` / `live_capture_consumers`) — no raw `from vllm import LLM` / `collective_rpc`. The subprocess-per-cell arm orchestration and fork-only load knobs (`max_dynamic_steering_configs`, `enable_row_monitor`, action queue) stay vLLM-specific by design (irreducible fork coupling; no cross-engine analog). |
-| `bench_patching_external.py` | not-yet | Cross-library causal-tracing sweep; separate adapter set. |
+| `bench_patching_external.py` | migrated (Phase 6) | Cross-library causal-tracing sweep. Now a thin driver over the `PatchSweepEngine` seam: `TLPatchSweepEngine` / `VllmPatchSweepEngine` (`engine/engines/patch_sweep_{tl,vllm}.py`) wrap the verified `external/tl_patching.py` / `external/vllm_patch_sweep.py`; `PatchSweepBenchmark` (`harness/benchmarks/patch_sweep.py`) owns discovery, the sweep loop, per-engine `write_result(engine=...)`, the argmax-agreement check, and the cells/s summary. Every variant (`tl_naive`/`tl_batched`/`vllm_sweep`) and metric preserved. Seam-native CLI: `python -m steering_bench run patch-sweep`. |
 | `bench_static_steering.py` | not-yet | Fork static-steering path. |
 | `bench_capture_e2e.py` | migrated (Phase 4) | Public-API capture-overhead sweep. Now builds `VllmSteeringEngine` via `configure_capture([CaptureConsumerSpec])` + per-request `RequestCapture`; no raw `from vllm import`. Seam-native equivalent: `python -m steering_bench run capture --capture-config ...` (`harness/benchmarks/capture.py`). |
 | `bench_capture_filesystem.py` | migrated (Phase 4) | ActivationWriter throughput. Now drives the engine-neutral `CaptureSink` seam (`make_capture_sink("vllm", SinkConfig)` wrapping `ActivationWriter`, `WriteChunk`/`WriteFinalize`, `SinkThroughput`); no raw fork import. |

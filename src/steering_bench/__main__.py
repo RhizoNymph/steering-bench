@@ -23,8 +23,10 @@ from steering_bench.harness.args import add_common_args
 from steering_bench.harness.benchmark import Benchmark, BenchmarkConfig
 from steering_bench.harness.benchmarks.registry import (
     BENCHMARK_REGISTRY,
+    PATCH_SWEEP_REGISTRY,
     SERVING_REGISTRY,
     get_benchmark,
+    get_patch_sweep_benchmark,
     get_serving_benchmark,
 )
 
@@ -62,6 +64,9 @@ def cmd_list(_: list[str]) -> int:
     for name in sorted(SERVING_REGISTRY):
         cls = SERVING_REGISTRY[name]
         print(f"  {name:<22} [serving]        {_summary_line(cls.__doc__)}")
+    for name in sorted(PATCH_SWEEP_REGISTRY):
+        cls = PATCH_SWEEP_REGISTRY[name]
+        print(f"  {name:<22} [patch-sweep]    {_summary_line(cls.__doc__)}")
     print()
     return 0
 
@@ -150,6 +155,39 @@ def _run_serving(name: str, rest: list[str]) -> int:
     return 0
 
 
+def _run_patch_sweep(name: str, rest: list[str]) -> int:
+    """Drive a patch-sweep benchmark down the PatchSweepEngine path.
+
+    Patch sweep is a distinct axis that selects its adapters from ``--variants``
+    (``tl_*`` / ``vllm_sweep``), not the steering ``--engine`` flag, so it uses a
+    dedicated arg set rather than :func:`add_common_args`.
+    """
+    bench_cls = get_patch_sweep_benchmark(name)
+    parser = argparse.ArgumentParser(prog=f"{PROG} run {name}")
+    parser.add_argument("benchmark", choices=[name])
+    parser.add_argument("--model", default="Qwen/Qwen3-0.6B", help="HuggingFace model id.")
+    parser.add_argument(
+        "--output-dir", default="results/patching", help="Directory for JSON results."
+    )
+    parser.add_argument("--tag", default="", help="Optional tag recorded in results.")
+    bench_cls.add_args(parser)
+    args = parser.parse_args(rest)
+
+    config = BenchmarkConfig(
+        model=args.model,
+        warmup=0,
+        iters=0,
+        max_tokens=1,
+        layer=0,
+        hook="post_block",
+        output_dir=args.output_dir,
+        tag=args.tag,
+    )
+    options = bench_cls.options_from_args(args)
+    bench_cls(config, **options).run()
+    return 0
+
+
 def cmd_run(rest: list[str]) -> int:
     # Peek at the benchmark name (help-agnostic, no choices/errors) so we can
     # register its extra flags before the real parse handles -h and validation.
@@ -159,11 +197,15 @@ def cmd_run(rest: list[str]) -> int:
 
     if known.benchmark in SERVING_REGISTRY:
         return _run_serving(known.benchmark, rest)
+    if known.benchmark in PATCH_SWEEP_REGISTRY:
+        return _run_patch_sweep(known.benchmark, rest)
 
     parser = argparse.ArgumentParser(prog=f"{PROG} run")
     parser.add_argument(
         "benchmark",
-        choices=sorted(BENCHMARK_REGISTRY) + sorted(SERVING_REGISTRY),
+        choices=sorted(BENCHMARK_REGISTRY)
+        + sorted(SERVING_REGISTRY)
+        + sorted(PATCH_SWEEP_REGISTRY),
         help="Benchmark to run.",
     )
     add_common_args(parser)
