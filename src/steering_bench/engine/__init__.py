@@ -17,6 +17,7 @@ from __future__ import annotations
 from steering_bench.engine.base import (
     Capabilities,
     EngineError,
+    SteeringConfig,
     SteeringEngine,
 )
 from steering_bench.engine.registry import (
@@ -43,6 +44,7 @@ __all__ = [
     "GenerationResult",
     "NamedModuleRef",
     "Steering",
+    "SteeringConfig",
     "SteeringEngine",
     "SteeringSpec",
     "SteeringSpecError",

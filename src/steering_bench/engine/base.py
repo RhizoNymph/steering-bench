@@ -14,12 +14,45 @@ from __future__ import annotations
 import abc
 import importlib.util
 from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING, Any
 
-from steering_bench.engine.spec import GenerationRequest, GenerationResult
+from steering_bench.engine.spec import (
+    GenerationRequest,
+    GenerationResult,
+    SteeringSpec,
+)
+
+if TYPE_CHECKING:
+    from steering_bench.engine.capture import CaptureConsumerSpec
 
 
 class EngineError(RuntimeError):
     """Raised when an engine is asked to do something it cannot support."""
+
+
+@dataclass(frozen=True)
+class SteeringConfig:
+    """Typed load-time steering configuration.
+
+    A small, engine-agnostic surface so callers stop passing opaque ``**opts``
+    for load-time steering knobs.  Engines translate the fields they support and
+    **no-op the rest**: ``enable_steering`` is the only universally meaningful
+    axis; ``max_steering_configs`` (worker steering-table capacity) and
+    ``enable_prefix_caching`` are vLLM-fork concepts that non-vLLM engines
+    ignore.  Advertise support via ``Capabilities.config_capacity`` /
+    ``Capabilities.prefix_cache``.
+    """
+
+    enable_steering: bool = True
+    max_steering_configs: int = 4
+    enable_prefix_caching: bool = True
+
+    def __post_init__(self) -> None:
+        if self.max_steering_configs < 0:
+            raise ValueError(
+                "SteeringConfig.max_steering_configs must be >= 0, got "
+                f"{self.max_steering_configs}"
+            )
 
 
 # -- shared GPU / package helpers (single definition, formerly external.base) --
@@ -63,6 +96,11 @@ class Capabilities:
     multi_layer: bool = False
     multi_hook: bool = False
     capture: bool = False
+    #: Honors ``SteeringConfig.enable_prefix_caching`` at load time.
+    prefix_cache: bool = False
+    #: Honors ``SteeringConfig.max_steering_configs`` (a bounded worker-side
+    #: steering-config table) at load time.
+    config_capacity: bool = False
 
     def satisfies(self, required: Capabilities) -> bool:
         """True if ``self`` provides every capability ``required`` demands.
@@ -87,8 +125,75 @@ class SteeringEngine(abc.ABC):
     capabilities: Capabilities = Capabilities()
 
     @abc.abstractmethod
-    def load(self, model_id: str, **opts: object) -> None:
-        """Load ``model_id`` and configure steering. Engine-specific ``opts``."""
+    def load(
+        self,
+        model_id: str,
+        *,
+        steering_config: SteeringConfig | None = None,
+        **opts: object,
+    ) -> None:
+        """Load ``model_id`` and configure steering.
+
+        ``steering_config`` carries the typed load-time steering knobs
+        (``enable_steering`` / ``max_steering_configs`` /
+        ``enable_prefix_caching``).  An engine translates the fields it supports
+        and no-ops the rest; ``None`` means "use engine defaults".  Remaining
+        engine-specific settings still travel through ``opts``.
+        """
+
+    def register_module(
+        self,
+        name: str,
+        spec: SteeringSpec,
+        *,
+        replace: bool = True,
+        prefill: SteeringSpec | None = None,
+        decode: SteeringSpec | None = None,
+    ) -> None:
+        """Register a named steering module so requests can reference it by name.
+
+        Default implementation raises ``EngineError``: only engines advertising
+        ``Capabilities.named_modules`` override this.  ``prefill`` / ``decode``
+        allow distinct prefill/decode-phase vectors for serving; both default to
+        ``None`` (use ``spec`` for every phase).
+        """
+        raise EngineError(f"named modules unsupported by {self.name}")
+
+    # -- capture (CaptureEngine surface) -------------------------------------
+    #
+    # Capture is modelled as default-raising methods here (mirroring
+    # ``register_module``) rather than a separate ABC, so that ANY engine
+    # subclass answers ``EngineError`` -- not ``AttributeError`` -- when asked to
+    # capture without the capability. Only engines advertising
+    # ``Capabilities.capture`` override these; the vLLM adapter is the sole
+    # implementer today. Selection is gated via
+    # ``discover(required=Capabilities(capture=True))``.
+
+    def configure_capture(self, specs: list[CaptureConsumerSpec]) -> None:
+        """Declare capture consumers to install at ``load``.
+
+        Call before ``load``: the engine stores the specs and constructs the
+        capture manager (``LLM(capture_consumers=...)``) during ``load``. Default
+        raises ``EngineError``; only capture-capable engines override.
+        """
+        raise EngineError(f"capture unsupported by {self.name}")
+
+    def capture_status(self) -> list[dict[str, Any]]:
+        """Per-worker capture / dynamic-steering status for activation asserts.
+
+        Wraps the fork's ``collective_rpc("get_dynamic_steering_status")`` and
+        returns one dict per worker. Default raises ``EngineError``.
+        """
+        raise EngineError(f"capture unsupported by {self.name}")
+
+    def live_capture_consumers(self) -> list[Any]:
+        """In-process live capture-consumer instances (multiprocessing=0).
+
+        The capture arms have no worker status RPC; with the worker in-process
+        the benchmark reads each consumer's step counters here. Default raises
+        ``EngineError``.
+        """
+        raise EngineError(f"capture unsupported by {self.name}")
 
     @abc.abstractmethod
     def generate(self, requests: list[GenerationRequest]) -> list[GenerationResult]:

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """ActivationWriter throughput benchmark.
 
-Drives the filesystem writer (ActivationWriter) directly — no LLM, no
-capture manager — to measure raw disk throughput and finalize latency.
-Answers: "can the writer keep up with the model?"
+Drives the filesystem writer through the engine-neutral **CaptureSink** seam
+(`steering_bench.engine.capture_sink`) — no LLM, no capture manager — to measure
+raw disk throughput and finalize latency. Answers: "can the writer keep up with
+the model?" The vLLM sink wraps the fork's `ActivationWriter` (imported lazily);
+payloads stay synthetic float16 bytes.
 
 Sweep dimensions:
   writer_threads    — thread pool size (1, 2, 4, 8, ...)
@@ -37,16 +39,13 @@ import pathlib
 import shutil
 import sys
 import tempfile
-import threading
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
-from steering_bench.output import print_result_summary, write_result
-from steering_bench.timing import compute_stats
+from steering_bench.output import write_result
 
 
 def _detect_storage(path: pathlib.Path) -> dict:
@@ -108,41 +107,24 @@ def _run_one(
     fsync: bool,
     atomic_publish: bool,
 ) -> dict:
-    from vllm.v1.capture.consumers.filesystem.writer import (
-        ActivationWriter,
-        FinalizeTask,
-        WriteTask,
+    from steering_bench.engine.capture_sink import (
+        SinkConfig,
+        WriteChunk,
+        WriteFinalize,
+        make_capture_sink,
     )
 
-    writer = ActivationWriter(
-        root,
-        num_threads=num_threads,
-        queue_size=queue_size,
-        on_collision="overwrite",
-        fsync=fsync,
-        atomic_publish=atomic_publish,
+    sink = make_capture_sink(
+        "vllm",
+        SinkConfig(
+            root=root,
+            num_threads=num_threads,
+            queue_size=queue_size,
+            on_collision="overwrite",
+            fsync=fsync,
+            atomic_publish=atomic_publish,
+        ),
     )
-
-    # Timestamps: key → time of submit_finalize call (float, perf_counter)
-    submit_finalize_times: dict[tuple[str, int, str], float] = {}
-    finalize_done_times: dict[tuple[str, int, str], float] = {}
-    done_event = threading.Event()
-    total_to_finalize = num_requests
-    finalized_count = 0
-    count_lock = threading.Lock()
-
-    def on_status(result):
-        nonlocal finalized_count
-        if result.status in ("ok", "error"):
-            key = result.key
-            t = time.perf_counter()
-            finalize_done_times[key] = t
-            with count_lock:
-                finalized_count += 1
-                if finalized_count >= total_to_finalize:
-                    done_event.set()
-
-    writer.add_status_callback(on_status)
 
     # Build payloads once: rows_per_chunk rows per step, float16.
     row_bytes = hidden_size * 2  # float16
@@ -154,9 +136,9 @@ def _run_one(
 
     layer, hook_name = 0, "post_block"
 
-    # Emit all tasks.
-    t_start = time.perf_counter()
-
+    # Emit all tasks through the sink; the sink's ThroughputRecorder times the
+    # run and each finalize.
+    sink.start()
     for req_idx in range(num_requests):
         req_id = f"req_{req_idx:06d}"
         key = (req_id, layer, hook_name)
@@ -166,61 +148,30 @@ def _run_one(
         sidecar_path = req_dir / f"{layer}_{hook_name}.json"
 
         for step in range(steps_per_request):
-            writer.submit(WriteTask(
-                path=bin_path,
-                payload=payload,
-                append=(step > 0),
+            sink.submit_chunk(
+                WriteChunk(key=key, path=bin_path, payload=payload, append=(step > 0))
+            )
+
+        sink.submit_finalize(
+            WriteFinalize(
                 key=key,
-            ))
+                bin_path=bin_path,
+                sidecar_path=sidecar_path,
+                sidecar_payload={"req_id": req_id, "layer": layer, "hook": hook_name},
+            )
+        )
 
-        submit_finalize_times[key] = time.perf_counter()
-        writer.submit(FinalizeTask(
-            bin_path=bin_path,
-            sidecar_path=sidecar_path,
-            sidecar_payload={"req_id": req_id, "layer": layer, "hook": hook_name},
-            key=key,
-        ))
+    completed = sink.wait_for_all(num_requests, timeout=120.0)
+    report = sink.report()  # before shutdown so total_seconds excludes drain
+    sink.shutdown(timeout=30.0)
 
-    # Wait for all finalizations.
-    completed_in_time = done_event.wait(timeout=120.0)
-    t_end = time.perf_counter()
-
-    writer.shutdown(timeout=30.0)
-
-    with count_lock:
-        actual_completed = finalized_count
-    if not completed_in_time:
+    if completed < num_requests:
         raise RuntimeError(
-            f"Timed out: only {actual_completed}/{total_to_finalize} "
+            f"Timed out: only {completed}/{num_requests} "
             "finalizations completed within 120s"
         )
 
-    total_seconds = t_end - t_start
-    total_chunks = num_requests * steps_per_request
-    total_bytes = total_chunks * chunk_bytes
-
-    throughput_mb_s = (total_bytes / (1024 * 1024)) / total_seconds
-    chunks_per_s = total_chunks / total_seconds
-
-    # Finalize latencies (only keys that completed).
-    finalize_latencies_ms = []
-    for key, done_t in finalize_done_times.items():
-        submit_t = submit_finalize_times.get(key)
-        if submit_t is not None:
-            finalize_latencies_ms.append((done_t - submit_t) * 1000.0)
-
-    fin_stats = compute_stats(finalize_latencies_ms) if finalize_latencies_ms else None
-    completed = len(finalize_done_times)
-
-    return {
-        "throughput_mb_s": throughput_mb_s,
-        "chunks_per_s": chunks_per_s,
-        "total_mb": total_bytes / (1024 * 1024),
-        "total_seconds": total_seconds,
-        "completed": completed,
-        "finalize_p50_ms": fin_stats.p50_ms if fin_stats else None,
-        "finalize_p99_ms": fin_stats.p99_ms if fin_stats else None,
-    }
+    return report.to_dict()
 
 
 def main():

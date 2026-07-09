@@ -29,7 +29,6 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -37,19 +36,31 @@ import torch
 
 from steering_bench.capture_consumers.consumers import RecordingDriverConsumer
 from steering_bench.capture_consumers.runner import get_model_config, make_prompts
+from steering_bench.engine.base import SteeringConfig
+from steering_bench.engine.capture import CaptureConsumerSpec
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.engine.spec import GenerationRequest, RequestCapture
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 
+# Config = (name, capture-consumer specs, optional per-request capture opt-in).
+CaptureConfig = tuple[str, list[CaptureConsumerSpec], RequestCapture | None]
 
-def _measure(llm, prompts, sp_list, warmup: int, iters: int) -> list[float]:
+
+def _measure(
+    engine: VllmSteeringEngine,
+    requests: list[GenerationRequest],
+    warmup: int,
+    iters: int,
+) -> list[float]:
     for _ in range(warmup):
-        llm.generate(prompts, sp_list)
+        engine.generate(requests)
 
     samples = []
     for _ in range(iters):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        llm.generate(prompts, sp_list)
+        engine.generate(requests)
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         samples.append((t1 - t0) * 1000.0)
@@ -60,31 +71,34 @@ def _measure(llm, prompts, sp_list, warmup: int, iters: int) -> list[float]:
 def _run_config(
     model: str,
     config_name: str,
-    capture_consumers: list[Any] | None,
-    sampling_params_override: dict[str, Any],
+    specs: list[CaptureConsumerSpec],
+    request_capture: RequestCapture | None,
     batch_size: int,
     prompt_len: int,
     output_len: int,
     warmup: int,
     iters: int,
 ) -> dict:
-    from vllm import LLM, SamplingParams
-
     prompts = make_prompts(batch_size, prompt_len, model=model)
-    sp = SamplingParams(max_tokens=output_len, temperature=0.0, **sampling_params_override)
-    sp_list = [sp] * batch_size
+    requests = [
+        GenerationRequest(prompt=p, max_tokens=output_len, capture=request_capture)
+        for p in prompts
+    ]
 
     print(f"    [{config_name}] loading model...", flush=True)
-    llm = LLM(
-        model=model,
-        capture_consumers=capture_consumers,
-        gpu_memory_utilization=0.9,
+    engine = VllmSteeringEngine()
+    engine.configure_capture(specs)
+    # Capture-only benchmark: keep steering off so the baseline is not inflated
+    # by the steering subsystem.
+    engine.load(
+        model,
+        steering_config=SteeringConfig(enable_steering=False),
         max_model_len=512,
     )
 
     print(f"    [{config_name}] warmup={warmup}, iters={iters}...", flush=True)
     try:
-        samples = _measure(llm, prompts, sp_list, warmup, iters)
+        samples = _measure(engine, requests, warmup, iters)
         stats = compute_stats(samples)
         tokens_per_sec = (batch_size * output_len) / (stats.mean_ms / 1000.0)
         return {
@@ -97,17 +111,24 @@ def _run_config(
     except torch.cuda.OutOfMemoryError:
         return {"config": config_name, "error": "OOM"}
     finally:
-        del llm
+        engine.teardown()
         gc.collect()
         torch.cuda.empty_cache()
+
+
+def _logging_spec(mid_layer: int) -> CaptureConsumerSpec:
+    return CaptureConsumerSpec(
+        name="logging",
+        params={"hooks": {"post_block": [mid_layer]}, "positions": "last_prompt", "level": "WARNING"},
+    )
 
 
 def _build_configs(
     model: str,
     model_cfg: dict,
     tmpdir: str,
-) -> list[tuple[str, list[Any] | None, dict[str, Any]]]:
-    """Return list of (config_name, capture_consumers, sampling_params_override)."""
+) -> list[CaptureConfig]:
+    """Return list of (config_name, consumer specs, per-request capture)."""
     num_layers = model_cfg["num_layers"]
     mid_layer = min(6, num_layers - 1)
     all_layers = list(range(num_layers))
@@ -117,77 +138,34 @@ def _build_configs(
         positions="last_prompt",
     )
 
-    # Filesystem consumer: needs per-request SamplingParams.capture.
-    # Consumer uses reads_client_spec=True so we must opt in per-request.
-    fs_capture_spec = {
-        "request_id": "bench",
-        "tag": "benchmark",
-        "hooks": {"post_block": [mid_layer]},
-        "positions": "last_prompt",
-    }
-
     return [
-        # (config_name, capture_consumers, sampling_params_override)
-        ("baseline", None, {}),
-        ("logging_minimal", [
-            {
-                "name": "logging",
-                "params": {
-                    "hooks": {"post_block": [mid_layer]},
-                    "positions": "last_prompt",
-                    "level": "WARNING",
-                },
-            }
-        ], {}),
+        ("baseline", [], None),
+        ("logging_minimal", [_logging_spec(mid_layer)], None),
         ("logging_max", [
-            {
-                "name": "logging",
-                "params": {
-                    "hooks": {"post_block": all_layers},
-                    "positions": "all",
-                    "level": "WARNING",
-                },
-            }
-        ], {}),
+            CaptureConsumerSpec(
+                name="logging",
+                params={"hooks": {"post_block": all_layers}, "positions": "all", "level": "WARNING"},
+            )
+        ], None),
         ("logging_3x_same_hook", [
-            {
-                "name": "logging",
-                "instance_name": "log_a",
-                "params": {
-                    "hooks": {"post_block": [mid_layer]},
-                    "positions": "last_prompt",
-                    "level": "WARNING",
-                },
-            },
-            {
-                "name": "logging",
-                "instance_name": "log_b",
-                "params": {
-                    "hooks": {"post_block": [mid_layer]},
-                    "positions": "last_prompt",
-                    "level": "WARNING",
-                },
-            },
-            {
-                "name": "logging",
-                "instance_name": "log_c",
-                "params": {
-                    "hooks": {"post_block": [mid_layer]},
-                    "positions": "last_prompt",
-                    "level": "WARNING",
-                },
-            },
-        ], {}),
+            CaptureConsumerSpec(
+                name="logging",
+                instance_name=f"log_{c}",
+                params={"hooks": {"post_block": [mid_layer]}, "positions": "last_prompt", "level": "WARNING"},
+            )
+            for c in ("a", "b", "c")
+        ], None),
         ("filesystem_minimal", [
-            {
-                "name": "filesystem",
-                "params": {
-                    "root": tmpdir,
-                    "writer_threads": 4,
-                },
-            }
-        ], {"capture": {"filesystem": fs_capture_spec}}),
-        ("driver_minimal", [driver_consumer], {}),
+            CaptureConsumerSpec(name="filesystem", params={"root": tmpdir, "writer_threads": 4})
+        ], RequestCapture(
+            consumer="filesystem",
+            hooks={"post_block": [mid_layer]},
+            positions="last_prompt",
+            tag="benchmark",
+        )),
+        ("driver_minimal", [
+            CaptureConsumerSpec(name="driver_recording", location="driver", instance=driver_consumer)
+        ], None),
     ]
 
 
@@ -233,7 +211,7 @@ def main():
 
         if args.configs:
             wanted = set(args.configs.split(","))
-            all_configs = [(n, cc, sp) for (n, cc, sp) in all_configs if n in wanted]
+            all_configs = [cfg for cfg in all_configs if cfg[0] in wanted]
 
         all_results = []
 
@@ -241,12 +219,12 @@ def main():
             print(f"\n--- batch_size={batch_size} ---")
             baseline_mean: float | None = None
 
-            for config_name, capture_consumers, sp_override in all_configs:
+            for config_name, specs, request_capture in all_configs:
                 result = _run_config(
                     model=args.model,
                     config_name=config_name,
-                    capture_consumers=capture_consumers,
-                    sampling_params_override=sp_override,
+                    specs=specs,
+                    request_capture=request_capture,
                     batch_size=batch_size,
                     prompt_len=args.prompt_len,
                     output_len=args.output_len,

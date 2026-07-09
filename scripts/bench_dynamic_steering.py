@@ -69,6 +69,11 @@ os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from steering_bench.engine.base import SteeringConfig
+from steering_bench.engine.capture import CaptureConsumerSpec
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.engine.spec import GenerationRequest
+
 # Arm -> (enable_steering, enable_row_monitor). The consumer entry-point name
 # is always ``"bench_" + arm``.
 ARM_FLAGS: dict[str, tuple[bool, bool]] = {
@@ -160,18 +165,13 @@ def _gpu_sample() -> dict[str, int]:
         return {}
 
 
-def _dynamic_status(llm: Any) -> list[dict[str, Any]]:
-    """Per-worker ``get_dynamic_steering_status`` payloads (one per worker;
-    tp=pp=1 -> a single element)."""
-    res = llm.collective_rpc("get_dynamic_steering_status")
-    return list(res) if isinstance(res, (list, tuple)) else [res]
-
-
 class _ArmInactive(RuntimeError):
     """Raised when a cell's arm is not genuinely active after warmup."""
 
 
-def _assert_arm_active(arm: str, llm: Any, batch_size: int) -> dict[str, Any]:
+def _assert_arm_active(
+    arm: str, engine: VllmSteeringEngine, batch_size: int
+) -> dict[str, Any]:
     """Fail loudly unless the arm is genuinely active after warmup.
 
     Robust, post-warmup, OUT of the timed region. For steering arms we read the
@@ -202,11 +202,7 @@ def _assert_arm_active(arm: str, llm: Any, batch_size: int) -> dict[str, Any]:
         return {"active": True, "check": "baseline"}
 
     if arm in CAPTURE_ARMS:
-        from steering_bench.capture_consumers.bench_consumers import (
-            iter_live_consumers,
-        )
-
-        steps = [c._steps for c in iter_live_consumers()]
+        steps = [c._steps for c in engine.live_capture_consumers()]
         total = sum(steps)
         if total <= 0:
             raise _ArmInactive(
@@ -215,8 +211,8 @@ def _assert_arm_active(arm: str, llm: Any, batch_size: int) -> dict[str, Any]:
             )
         return {"active": True, "check": "consumer_steps", "consumer_steps": total}
 
-    # Steering arms: worker status RPC.
-    workers = _dynamic_status(llm)
+    # Steering arms: worker status RPC (through the CaptureEngine seam).
+    workers = engine.capture_status()
     diag: dict[str, Any] = {"check": "status_rpc", "workers": len(workers)}
     for wi, st in enumerate(workers):
         if not st.get("steering_initialized"):
@@ -275,66 +271,76 @@ def _assert_arm_active(arm: str, llm: Any, batch_size: int) -> dict[str, Any]:
 
 def _run_cell(args: argparse.Namespace) -> dict[str, Any]:
     import torch
-    from vllm import LLM, SamplingParams
 
     enable_steering, enable_row_monitor = ARM_FLAGS[args.arm]
     layers = resolve_layers(args.steer_layers, args.num_model_layers)
 
-    consumers: list[dict[str, Any]] | None = None
+    # Consumer declaration goes through the typed CaptureConsumerSpec seam.
+    specs: list[CaptureConsumerSpec] = []
     if args.arm != "off":
-        consumers = [
-            {"name": f"bench_{args.arm}", "params": _consumer_params(args, layers)}
+        specs = [
+            CaptureConsumerSpec(
+                name=f"bench_{args.arm}", params=_consumer_params(args, layers)
+            )
         ]
 
     prompts = _make_prompts(args.batch_size, args.prompt_len)
-    sp = SamplingParams(max_tokens=args.output_len, temperature=0.0, seed=0)
-    sp_list = [sp] * args.batch_size
+    # Greedy decode (temperature 0 in the adapter) is deterministic, so the
+    # per-request seed the raw script set is unnecessary.
+    requests = [
+        GenerationRequest(prompt=p, max_tokens=args.output_len) for p in prompts
+    ]
 
-    kwargs: dict[str, Any] = dict(
-        model=args.model,
-        capture_consumers=consumers,
+    # Fork-specific load knobs travel through the adapter's **opts passthrough;
+    # ``enable_steering`` is the typed SteeringConfig axis. ``enable_prefix_caching``
+    # / ``max_steering_configs`` follow the SteeringConfig defaults (True / 4),
+    # which match vLLM's defaults — the dynamic pool is sized separately via
+    # ``max_dynamic_steering_configs`` below.
+    load_opts: dict[str, Any] = dict(
         gpu_memory_utilization=args.gpu_mem_util,
         max_model_len=args.prompt_len + args.output_len + 64,
         enforce_eager=args.enforce_eager,
         seed=0,
     )
     if enable_steering:
-        kwargs["enable_steering"] = True
         # Per-request arms need one dynamic-pool row per concurrent request;
         # +4 headroom avoids an exactly-full pool at the batch/generate seam.
         # Tier arms use a single global config, so 4 is plenty for them.
-        kwargs["max_dynamic_steering_configs"] = (
+        load_opts["max_dynamic_steering_configs"] = (
             max(args.batch_size + 4, 8) if args.arm in PERREQ_ARMS else 4
         )
         if enable_row_monitor:
-            # Verified plumbing: LLM(**kwargs) forwards this straight into
-            # EngineArgs.enable_row_monitor (vllm/engine/arg_utils.py:601),
-            # which — when enable_steering is set — reaches
-            # SteeringConfig(enable_row_monitor=...) (arg_utils.py:2219) and
-            # is a compute_hash factor that resizes the per-row probe-table
-            # buffers. The activation assertion re-checks it actually landed
-            # via status["row_monitor"]["enabled"].
-            kwargs["enable_row_monitor"] = True
+            # Forwarded straight into EngineArgs.enable_row_monitor, which — when
+            # enable_steering is set — reaches SteeringConfig(enable_row_monitor=...)
+            # and resizes the per-row probe-table buffers. The activation
+            # assertion re-checks it landed via status["row_monitor"]["enabled"].
+            load_opts["enable_row_monitor"] = True
 
-    llm = LLM(**kwargs)
+    engine = VllmSteeringEngine()
+    engine.configure_capture(specs)
+    engine.load(
+        args.model,
+        steering_config=SteeringConfig(enable_steering=enable_steering),
+        **load_opts,
+    )
     try:
         for _ in range(args.warmup):
-            llm.generate(prompts, sp_list)
+            engine.generate(requests)
         # Activation gate — AFTER warmup, BEFORE the timed region (no added
         # work inside timing). Counters/tier/monitor state persist post-run.
-        arm_diag = _assert_arm_active(args.arm, llm, args.batch_size)
+        arm_diag = _assert_arm_active(args.arm, engine, args.batch_size)
 
         gpu_start = _gpu_sample()
         samples_ms: list[float] = []
         for _ in range(args.iters):
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            llm.generate(prompts, sp_list)
+            engine.generate(requests)
             torch.cuda.synchronize()
             samples_ms.append((time.perf_counter() - t0) * 1000.0)
         gpu_end = _gpu_sample()
     finally:
-        del llm
+        engine.teardown()
         gc.collect()
         torch.cuda.empty_cache()
 

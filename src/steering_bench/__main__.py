@@ -100,7 +100,7 @@ def _run_comparison(
     options: dict[str, Any],
 ) -> int:
     print("Discovering engines:")
-    engine_classes = discover()
+    engine_classes = discover(required=bench_cls.required_capabilities)
     if not engine_classes:
         print("No engines available. Install an engine backend.")
         return 1
@@ -143,9 +143,14 @@ def cmd_run(rest: list[str]) -> int:
     if bench_cls.is_comparison:
         return _run_comparison(bench_cls, config, options)
 
-    engine_classes = discover(filter_names=[args.engine])
+    engine_classes = discover(
+        filter_names=[args.engine], required=bench_cls.required_capabilities
+    )
     if not engine_classes:
-        print(f"Engine {args.engine!r} is not available in this environment.")
+        print(
+            f"Engine {args.engine!r} is not available or lacks the capabilities "
+            f"required by {args.benchmark!r} ({bench_cls.required_capabilities})."
+        )
         return 1
     engine = engine_classes[0]()
     bench_cls(engine, config, **options).run()

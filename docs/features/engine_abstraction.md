@@ -56,8 +56,11 @@ into its native form inside `generate`:
 
 - vLLM: `spec_to_native(spec)` -> `{hook:{layer:[floats]}}` passed as
   `SamplingParams(steering_vectors=...)`; `NamedModuleRef` ->
-  `SamplingParams(steering_module_ref=name)`. These translation functions are
-  pure and do **not** import vllm.
+  `SamplingParams(steering_module_ref=(name, scale))` — the **`(name, scale)`
+  tuple** the fork expects (Phase 3 fixed the earlier bare-name bug).
+  `named_payload_from_spec(spec, prefill=, decode=)` builds the
+  `{"vectors": {...}}` `register_steering_modules` payload (numpy-coercing).
+  These translation functions are pure and do **not** import vllm.
 - TransformerLens: `_resolve_single(spec)` enforces single-hook/single-layer,
   `_hook_name(hook, layer)` maps to `blocks.{layer}.{suffix}`, and an additive
   forward hook adds the vector each forward pass.
@@ -85,10 +88,10 @@ hook-mapping logic is unit-testable with nothing installed.
 
 | File | Role | Key exports |
 |------|------|-------------|
-| `src/steering_bench/engine/spec.py` | Typed domain model + validation | `SteeringSpec` (`from_vector_dict`, `single`, `hooks`, `layers`, `dim`, `is_multi_hook`, `is_multi_layer`, `is_single_hook_single_layer`, `to_vector_dict`), `NamedModuleRef`, `GenerationRequest`, `GenerationResult` (+`output_tokens_exact`), `Steering`, `SteeringSpecError` |
-| `src/steering_bench/engine/base.py` | Engine ABC + capability descriptor + GPU helpers | `Capabilities` (+`satisfies`), `SteeringEngine`, `EngineError`, `gpu_memory_mb`, `cleanup_gpu`, `is_library_available` (single definition; formerly `external.base`) |
+| `src/steering_bench/engine/spec.py` | Typed domain model + validation | `SteeringSpec` (`from_vector_dict`, `single`, `hooks`, `layers`, `dim`, `is_multi_hook`, `is_multi_layer`, `is_single_hook_single_layer`, `to_vector_dict`), `NamedModuleRef` (+`scale`), `GenerationRequest`, `GenerationResult` (+`output_tokens_exact`), `Steering`, `SteeringSpecError` |
+| `src/steering_bench/engine/base.py` | Engine ABC + capability descriptor + load config + GPU helpers | `Capabilities` (+`satisfies`, +`prefix_cache`/`config_capacity`), `SteeringConfig`, `SteeringEngine` (`load(steering_config=)`, `register_module`), `EngineError`, `gpu_memory_mb`, `cleanup_gpu`, `is_library_available` (single definition; formerly `external.base`) |
 | `src/steering_bench/engine/registry.py` | Data-driven, capability-aware discovery | `EngineEntry`, `ENGINE_REGISTRY` (6 engines), `discover`, `is_package_available` |
-| `src/steering_bench/engine/engines/vllm.py` | vLLM adapter + pure translation | `VllmSteeringEngine`, `spec_to_native`, `named_ref_to_kwargs`, `steering_kwargs` |
+| `src/steering_bench/engine/engines/vllm.py` | vLLM adapter + pure translation | `VllmSteeringEngine` (`load(steering_config=)`, `register_module`), `spec_to_native`, `named_ref_to_kwargs`, `named_payload_from_spec`, `steering_kwargs` |
 | `src/steering_bench/engine/engines/transformerlens.py` | TransformerLens adapter | `TransformerLensSteeringEngine`, `_resolve_single`, `_hook_name` |
 | `src/steering_bench/engine/engines/hf.py` | HF no-op baseline adapter | `HFSteeringEngine` |
 | `src/steering_bench/engine/engines/nnsight.py` | nnsight adapter | `NnsightSteeringEngine`, `resolve_single`, `layer_path`, `batch_placeholder_results` |
@@ -121,8 +124,31 @@ hook-mapping logic is unit-testable with nothing installed.
 - **TransformerLens** supports only single-hook/single-layer inline specs and
   rejects `NamedModuleRef` (`EngineError`); it generates sequentially.
 - **vLLM load defaults** match the legacy adapters: `enable_steering=True`,
-  `max_steering_configs=4`, `gpu_memory_utilization=0.9`, `max_model_len=2048`
+  `max_steering_configs=4`, `enable_prefix_caching=True` (via the default
+  `SteeringConfig`), plus `gpu_memory_utilization=0.9`, `max_model_len=2048`
   (overridable via `load(**opts)`).
+- **Named-module reference encoding (Phase 3).** `NamedModuleRef` carries a
+  `scale: float = 1.0` (frozen, finite-validated); vLLM encodes it as the
+  `(name, scale)` tuple in `SamplingParams.steering_module_ref`. The prior
+  bare-name encoding was a real bug and is fixed.
+- **Typed load-time steering config (Phase 3).** `SteeringConfig`
+  (`enable_steering`/`max_steering_configs`/`enable_prefix_caching`) is the
+  engine-agnostic load surface. `load(model_id, *, steering_config=None, **opts)`;
+  each engine translates the fields it supports and **no-ops the rest**. Non-vLLM
+  engines ignore `max_steering_configs`/`enable_prefix_caching` (they advertise
+  `config_capacity=False`/`prefix_cache=False`); only vLLM sets both `True`.
+  Backward-compatible: `load` without `steering_config` still works.
+- **Named-module registration (Phase 3).** `register_module(name, spec, *,
+  replace=True, prefill=None, decode=None)` defaults to raising
+  `EngineError("named modules unsupported by <engine>")`; only engines with
+  `named_modules=True` override it. vLLM calls
+  `collective_rpc("register_steering_modules", {modules:{name:{"vectors":…}}, replace})`.
+- **Deferred `SteeringSpec` extensions.** The optional per-row `scales` and
+  `prefill`/`decode` splits on `SteeringSpec` are **deferred to Phase 5**
+  (serving): they are only needed there, and adding them now would complicate the
+  spec's construction/validation invariants for no in-phase consumer. The vLLM
+  named payload already threads `prefill`/`decode` **specs** through
+  `named_payload_from_spec` / `register_module` so the wire format is ready.
 - **Phase 2 retirement.** The old `external/base.py::SteeringBenchmark` protocol
   and its per-library adapters were deleted; every steering library is now a
   `SteeringEngine` adapter here, and `scripts/bench_external.py` is a shim to

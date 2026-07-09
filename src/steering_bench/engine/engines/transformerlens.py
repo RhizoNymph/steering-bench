@@ -12,7 +12,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from steering_bench.engine.base import Capabilities, EngineError, SteeringEngine
+from steering_bench.engine.base import (
+    Capabilities,
+    EngineError,
+    SteeringConfig,
+    SteeringEngine,
+)
 from steering_bench.engine.spec import (
     GenerationRequest,
     GenerationResult,
@@ -70,7 +75,16 @@ class TransformerLensSteeringEngine(SteeringEngine):
         self._model: Any | None = None
         self._device: str = "cuda"
 
-    def load(self, model_id: str, **opts: object) -> None:
+    def load(
+        self,
+        model_id: str,
+        *,
+        steering_config: SteeringConfig | None = None,
+        **opts: object,
+    ) -> None:
+        # steering_config knobs (max_steering_configs / prefix caching) are
+        # vLLM-fork concepts with no analog here; ignored (no-op).
+        del steering_config
         from transformer_lens import HookedTransformer
 
         dtype = opts.pop("dtype", "float16")
