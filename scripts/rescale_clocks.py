@@ -20,7 +20,6 @@ import json
 import shutil
 from pathlib import Path
 
-
 _TPS_SUFFIX = "_tps"
 _MS_SUFFIX = "_ms"
 # Keys whose numeric values are sample counts / ratios — not clock-scaled.

@@ -21,8 +21,8 @@ from steering_bench.timing import cpu_timer
 from steering_bench.vectors import random_steering_vectors
 
 try:
-    from vllm.v1.worker.steering_manager import SteeringManager
     from vllm.model_executor.layers.steering import register_steering_buffers
+    from vllm.v1.worker.steering_manager import SteeringManager
     HAS_VLLM = True
 except ImportError:
     HAS_VLLM = False
@@ -131,7 +131,7 @@ def main():
     ]
 
     total = len(layer_counts) * len(config_counts) * len(hook_point_sets)
-    print(f"SteeringManager benchmark")
+    print("SteeringManager benchmark")
     print(f"Device: {args.device}")
     print(f"Sweep: {total} configurations")
     print()

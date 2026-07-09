@@ -93,6 +93,16 @@ def steering_kwargs(steering: Steering) -> dict[str, Any]:
         case None:
             return {}
         case SteeringSpec():
+            # The offline inline format (``steering_vectors``) has no per-row
+            # scale field — only the serving packer honors ``SteeringSpec.scales``.
+            # Refuse rather than silently drop them; bake scales into the vectors
+            # or use a named module / the serving path instead.
+            if steering.scales is not None:
+                raise ValueError(
+                    "offline vLLM inline steering cannot express per-row scales "
+                    "(SteeringSpec.scales); bake the scales into the vectors, or "
+                    "use a named module / the serving path."
+                )
             return {"steering_vectors": spec_to_native(steering)}
         case NamedModuleRef():
             return named_ref_to_kwargs(steering)

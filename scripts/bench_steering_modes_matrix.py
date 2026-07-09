@@ -43,15 +43,15 @@ import time
 
 import torch  # noqa: F401  imported for cuda OOM exception class
 
-from steering_bench.engine.engines.vllm import VllmSteeringEngine
-from steering_bench.harness.args import engine_names
-from steering_bench.harness.models import get_model_config
-from steering_bench.output import write_result
-
 # Reuse the throughput primitive — gives both latency and tokens/sec
 # per cell for free, sharing the LLM-init cost.  Resolved from the script
 # directory, which Python places on sys.path[0] when this file is run.
 from bench_throughput import run_throughput  # type: ignore[import-not-found]
+
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
+from steering_bench.output import write_result
 
 # ---------------------------------------------------------------------------
 # Subset presets

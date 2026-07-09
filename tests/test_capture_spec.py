@@ -18,7 +18,6 @@ from steering_bench.engine.spec import (
     SteeringSpecError,
 )
 
-
 # -- CaptureConsumerSpec ------------------------------------------------------
 
 

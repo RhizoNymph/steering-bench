@@ -1,6 +1,9 @@
 import time
+
 from vllm.config.steering_types import hash_steering_config
+
 from steering_bench.vectors import random_steering_vectors
+
 vectors = random_steering_vectors(
     hidden_size=2560, num_layers=34,
     hook_points=["post_block"], scale=0.1, seed=42,

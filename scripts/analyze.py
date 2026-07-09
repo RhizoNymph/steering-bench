@@ -29,7 +29,6 @@ import pandas as pd
 
 from steering_bench.analysis.aggregate import aggregate
 
-
 # ── Styling ───────────────────────────────────────────────────────────────────
 
 COLORS = {
@@ -2074,7 +2073,7 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nGenerating plots...")
+    print("\nGenerating plots...")
 
     # vLLM system benchmarks
     plot_overhead_bars(df, output_dir, args.format)

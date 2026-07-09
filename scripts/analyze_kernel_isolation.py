@@ -100,7 +100,7 @@ def main() -> None:
         rels = print_table(workload, on, off)
         all_rels.extend(rels)
 
-    print(f"\n=== headline ===")
+    print("\n=== headline ===")
     if all_rels:
         print(
             f"kernel-off / kernel-on geomean across all "

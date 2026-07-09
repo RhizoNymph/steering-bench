@@ -45,7 +45,6 @@ from steering_bench.capture_consumers.runner import (
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 
-
 # Points below 100 μs are dropped for sleep/queue modes (scheduler-limited).
 _SLEEP_MIN_US = 100.0
 

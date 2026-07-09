@@ -211,7 +211,7 @@ def main():
             )
 
         except torch.cuda.OutOfMemoryError:
-            print(f"    OOM!")
+            print("    OOM!")
             result = {"error": "OOM"}
             overhead_pct = None
 

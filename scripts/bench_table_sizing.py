@@ -219,7 +219,7 @@ def main():
                     engine=engine_identity,
                 )
             except torch.cuda.OutOfMemoryError:
-                print(f"    OOM!")
+                print("    OOM!")
                 results_map[(0, bs, 0)] = {"error": "OOM"}
 
         del llm
@@ -334,7 +334,7 @@ def main():
 
     # Throughput loss % vs disabled, by distinct x (max_cfg, batch_size)
     print(f"\n{'=' * 100}")
-    print(f"  Throughput loss (%) vs disabled")
+    print("  Throughput loss (%) vs disabled")
     print(f"{'=' * 100}")
 
     header = f"{'distinct':<10}"

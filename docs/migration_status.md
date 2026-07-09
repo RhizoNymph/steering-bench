@@ -148,3 +148,42 @@ columns do not apply. See `scripts/vllm_internal/README.md`.
 | `vllm_internal/bench_capture_latency.py` | Capture delivery latency (microbench + e2e). |
 | `vllm_internal/bench_capture_plugin_work.py` | Per-chunk plugin work budget (microbench + e2e). |
 | `vllm_internal/bench_capture_packed.py` | `per_file` vs `packed` filesystem-consumer layout throughput. |
+
+## Post-migration correctness review + validation notes
+
+A read-only correctness review of the seam→fork translation layers plus a
+partial GPU validation were run after the 7 phases merged.
+
+**Validated on hardware (RTX 3090):** the full framework spine end-to-end via a
+real HF-engine run — `run latency`/`run external-comparison --engine hf_baseline`
+on `Qwen/Qwen3-0.6B`: CLI dispatch, `Benchmark.run`, the engine seam, result
+schema with the `engine` identity block, and `aggregate` (`engine_name` column).
+The comparison table also confirmed the framework **gracefully skips an
+installed-but-unusable engine** (`vllm` shows `FAILED`, `hf_baseline` succeeds).
+
+**Not yet validated (needs GPU + a *built* vLLM fork):** all vLLM-dependent
+paths. On the dev box the fork is editable-installed but the compiled extension
+(`vllm._C`) is absent, so `import vllm` fails — the named-module RPC, capture
+consumers, live serving server, and vLLM patch-sweep have not executed
+end-to-end. These remain the user's acceptance step.
+
+**Encoders verified byte-for-byte** against the pre-refactor scripts (named
+registration payload + `(name, scale)` ref, serving base64 packing + TTFT/TPOT/
+ITL/E2EL, capture consumer/request specs, patch-sweep dict mapping, load-time
+config, result schema) — no payload-corruption bug found.
+
+**Fixed** (silent-drop → loud error): (1) serving named-module references with a
+non-default `scale` now raise instead of dropping the scale; (2) an offline
+inline `SteeringSpec` carrying per-row `scales` now raises instead of applying
+vectors unscaled (only the serving packer honors per-row scales).
+
+**Open caveats to confirm during GPU acceptance:**
+- The migrated `bench_dynamic_steering.py` / capture scripts now pass
+  `SteeringConfig` defaults (`enable_prefix_caching=True`, `max_steering_configs=4`)
+  where the pre-refactor scripts passed neither, leaving fork defaults. Confirm
+  the fork's defaults match; if not, thread the intended values explicitly, since
+  prefix caching materially moves per-request steering cost.
+- The engine-agnostic `run latency`/`run throughput` benchmarks steer a single
+  `(layer, hook)`, whereas the headline `bench_latency.py`/`bench_throughput.py`
+  steer all layers / multiple hooks. Their overhead numbers are **not directly
+  comparable**; don't aggregate the two families as one series.

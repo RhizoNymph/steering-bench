@@ -118,3 +118,16 @@ def test_named_payload_prefill_decode_split() -> None:
     assert payload["vectors"] == {"post_block": {1: [1.0, 2.0]}}
     assert payload["prefill_vectors"] == {"post_block": {1: [3.0, 4.0]}}
     assert payload["decode_vectors"] == {"post_block": {1: [5.0, 6.0]}}
+
+
+def test_steering_kwargs_rejects_offline_per_row_scales() -> None:
+    """Finding #2: offline inline steering has no per-row scale field, so a
+    SteeringSpec carrying scales must raise rather than silently drop them."""
+    import dataclasses
+
+    spec = SteeringSpec.single("post_block", 0, [1.0, 2.0])
+    scaled = dataclasses.replace(spec, scales=(0.5,))
+    with pytest.raises(ValueError, match="per-row scales"):
+        steering_kwargs(scaled)
+    # an unscaled spec is unaffected
+    assert "steering_vectors" in steering_kwargs(spec)

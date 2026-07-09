@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 
 import numpy as np
+import pytest
 
 from steering_bench.engine.serving import (
     named_register_payload,
@@ -66,7 +67,9 @@ def test_steering_extra_body_variants() -> None:
     body = steering_extra_body(spec)
     assert set(body) == {"steering_vectors"}
     assert "post_block" in body["steering_vectors"]
-    named = steering_extra_body(NamedModuleRef("mod", 2.0))
+    # A named ref encodes to a bare name; a non-default scale is rejected
+    # (covered by test_steering_extra_body_rejects_named_ref_scale).
+    named = steering_extra_body(NamedModuleRef("mod"))
     assert named == {"steering_name": "mod"}
 
 
@@ -81,3 +84,12 @@ def test_packer_pulls_in_no_http_stack() -> None:
     steering_extra_body(NamedModuleRef("m"))
     newly = set(sys.modules) - before
     assert not ({"vllm", "openai", "httpx"} & newly)
+
+
+def test_steering_extra_body_rejects_named_ref_scale() -> None:
+    """Finding #1: the HTTP serving path can't express a named-ref scale, so a
+    non-default scale must raise rather than be silently applied as 1.0."""
+    with pytest.raises(ValueError, match="cannot carry a scale"):
+        steering_extra_body(NamedModuleRef("m", scale=2.0))
+    # default scale (1.0) is the encodable case
+    assert steering_extra_body(NamedModuleRef("m")) == {"steering_name": "m"}
