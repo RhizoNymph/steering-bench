@@ -21,23 +21,16 @@ from __future__ import annotations
 
 import argparse
 import gc
-import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import random_steering_vectors
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-}
 
 
 def make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
@@ -237,9 +230,25 @@ def main():
             "Leave unset to use vLLM's default."
         ),
     )
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. This benchmark probes vLLM-fork continuous "
+             "batching (whether non-steered requests pay the steering cost); "
+             "only --engine vllm is supported (no engine-agnostic equivalent).",
+    )
     args = parser.parse_args()
 
-    model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this script measures "
+            "vLLM-fork mixed-batch steering cost, which has no engine-agnostic "
+            "equivalent. Use --engine vllm."
+        )
+
+    model_config = get_model_config(args.model)
+    engine_identity = VllmSteeringEngine().identity()
 
     bs = args.batch_size
     if args.num_active_only is not None:
@@ -292,8 +301,8 @@ def main():
                 max_tokens=args.max_tokens,
                 warmup=args.warmup,
                 iters=args.iters,
-                hidden_size=model_config["hidden_size"],
-                num_layers=model_config["num_layers"],
+                hidden_size=model_config.hidden_size,
+                num_layers=model_config.num_layers,
                 distinct_vectors=args.distinct_vectors,
                 max_steering_configs=max_steering_configs,
                 gpu_memory_utilization=args.gpu_memory_utilization,
@@ -364,6 +373,7 @@ def main():
             output_dir=args.output_dir,
             tag=args.tag,
             raw_samples_ms=result["latency"].get("samples_ms") if result and "error" not in result else None,
+            engine=engine_identity,
         )
         all_results.append({
             "label": label,

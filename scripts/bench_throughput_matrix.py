@@ -15,24 +15,16 @@ from __future__ import annotations
 
 import argparse
 import gc
-import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import random_steering_vectors
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-}
 
 
 def make_prompts(num_prompts: int, prompt_len: int) -> list[str]:
@@ -138,13 +130,29 @@ def main():
         "--gpu-memory-utilization", type=float, default=0.9,
     )
     parser.add_argument("--max-model-len", type=int, default=2048)
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. This throughput matrix exercises vLLM-fork "
+             "steering internals (mixed-fraction batches, max_steering_configs); "
+             "only --engine vllm is supported. For an engine-agnostic throughput "
+             "sweep use `python -m steering_bench run throughput`.",
+    )
     args = parser.parse_args()
+
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this script measures "
+            "vLLM-fork steering internals with no engine-agnostic equivalent. "
+            "Use --engine vllm, or `python -m steering_bench run throughput` "
+            "for the portable subset."
+        )
 
     batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
     fractions = [float(x) for x in args.fractions.split(",")]
-    model_config = MODEL_CONFIGS.get(
-        args.model, {"hidden_size": 2560, "num_layers": 34}
-    )
+    model_config = get_model_config(args.model)
+    engine_identity = VllmSteeringEngine().identity()
 
     print(f"Throughput matrix benchmark: {args.model}")
     print(f"Batch sizes: {batch_sizes}")
@@ -154,8 +162,8 @@ def main():
 
     # Pre-generate one steering vector (shared across all steered requests)
     steering_vectors = random_steering_vectors(
-        hidden_size=model_config["hidden_size"],
-        num_layers=model_config["num_layers"],
+        hidden_size=model_config.hidden_size,
+        num_layers=model_config.num_layers,
         hook_points=["post_block"],
         scale=0.1,
         seed=42,
@@ -296,6 +304,7 @@ def main():
                     output_dir=args.output_dir,
                     tag=args.tag,
                     raw_samples_ms=result["latency"].get("samples_ms"),
+                    engine=engine_identity,
                 )
             except torch.cuda.OutOfMemoryError:
                 print(f"    {mode:<14} ({num_active}/{bs}): OOM!")

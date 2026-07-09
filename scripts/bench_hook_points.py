@@ -12,25 +12,16 @@ from __future__ import annotations
 
 import argparse
 import gc
-import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import torch
 
+from steering_bench.engine.engines.vllm import VllmSteeringEngine
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.output import write_result
 from steering_bench.timing import compute_stats
 from steering_bench.vectors import random_steering_vectors
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-    "meta-llama/Llama-3.1-8B": {"hidden_size": 4096, "num_layers": 32},
-}
 
 HOOK_CONFIGS = [
     {
@@ -129,10 +120,26 @@ def main():
     parser.add_argument("--batch-sizes", default="1,4,8")
     parser.add_argument("--prompt-len", type=int, default=64)
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. This ablation sweeps the vLLM-fork steering "
+             "hook points (pre_attn/post_attn/post_block); only --engine vllm "
+             "is supported (no engine-agnostic equivalent).",
+    )
     args = parser.parse_args()
 
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this script sweeps "
+            "vLLM-fork steering hook points, which has no engine-agnostic "
+            "equivalent. Use --engine vllm."
+        )
+
     batch_sizes = [int(x) for x in args.batch_sizes.split(",")]
-    model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
+    model_config = get_model_config(args.model)
+    engine_identity = VllmSteeringEngine().identity()
 
     total = len(HOOK_CONFIGS) * len(batch_sizes)
     print(f"Hook Points Ablation: {args.model}")
@@ -159,8 +166,8 @@ def main():
                     max_tokens=args.max_tokens,
                     warmup=args.warmup,
                     iters=args.iters,
-                    hidden_size=model_config["hidden_size"],
-                    num_layers=model_config["num_layers"],
+                    hidden_size=model_config.hidden_size,
+                    num_layers=model_config.num_layers,
                 )
 
                 mean = stats["mean_ms"]
@@ -207,6 +214,7 @@ def main():
                 output_dir=args.output_dir,
                 tag=args.tag,
                 raw_samples_ms=stats.get("samples_ms"),
+                engine=engine_identity,
             )
             all_results.append({
                 "hook_config": hook_cfg["name"],

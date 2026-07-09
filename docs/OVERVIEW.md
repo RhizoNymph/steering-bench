@@ -50,19 +50,19 @@ All results share a common JSON schema with environment metadata, parameters, an
 - doc: scripts/vllm_internal/README.md
 
 ### vllm_benchmarks
-- description: End-to-end vLLM system benchmarks (latency, throughput, memory). As of Phase C the three headline scripts drop the `sys.path` hack, resolve model dims via `harness.models.get_model_config`, take `--engine` (guarded to `vllm` since the modes are fork-specific), and stamp results with the first-class `engine` block. As of Phase 3 the engine-agnostic offline modes are first-class in the harness (`python -m steering_bench run latency|throughput --mode ...`); the `scripts/bench_latency.py`/`bench_throughput.py` scripts remain for fork-specific deep-dives (prefix-cache isolation, auto-promote nuances) pending Phase 7 retirement.
+- description: End-to-end vLLM system benchmarks (latency, throughput, memory). As of Phase C the three headline scripts drop the `sys.path` hack, resolve model dims via `harness.models.get_model_config`, take `--engine` (guarded to `vllm` since the modes are fork-specific), and stamp results with the first-class `engine` block. As of Phase 3 the engine-agnostic offline modes are first-class in the harness (`python -m steering_bench run latency|throughput --mode ...`); the `scripts/bench_latency.py`/`bench_throughput.py` scripts remain for fork-specific deep-dives (prefix-cache isolation, auto-promote nuances). **As of Phase 7 (final)** the entire long tail follows the same pattern — every remaining perf/profiling/correctness script (`bench_throughput_matrix`, `bench_max_tokens`, `bench_mixed_batch`, `bench_table_sizing`, `verify_correctness`, `profile_steering`, `nsys_target`, `bench_steering_with_capture`, plus the modes-matrix and ablation scripts below) now sources dims from `harness.models`, carries no `sys.path` hack, and takes a `--engine` flag guarded to `vllm`; the ones that write results stamp the `engine` block. No script outside `scripts/vllm_internal/` defines a local `MODEL_CONFIGS`.
 - entry_points: [scripts/bench_latency.py, scripts/bench_throughput.py, scripts/bench_memory.py, scripts/bench_steering_with_capture.py]
 - depends_on: [core, engine_abstraction, harness]
 - doc: docs/features/vllm_benchmarks.md
 
 ### steering_modes_matrix
-- description: Cross-product bench of steering modes (named_shared, inline_shared, inline_unique, per_request_4, enabled_idle, disabled) × {batch_size, num_hooks, layer_subset, prompt_len}.  One sweep produces the comparison data for "did the new optimizations close the gap?"
+- description: Cross-product bench of steering modes (named_shared, inline_shared, inline_unique, per_request_4, enabled_idle, disabled) × {batch_size, num_hooks, layer_subset, prompt_len}.  One sweep produces the comparison data for "did the new optimizations close the gap?"  Phase 7: dims via `harness.models`, no `sys.path`, `--engine vllm`-guarded, `engine` block stamped; reuses `bench_throughput.run_throughput` per cell.
 - entry_points: [scripts/bench_steering_modes_matrix.py]
 - depends_on: [core, vllm_benchmarks]
 - doc: docs/features/steering_modes_matrix.md
 
 ### ablation_benchmarks
-- description: Optimization interaction tests (CUDA graphs, config scaling, hook points)
+- description: Optimization interaction tests (CUDA graphs, config scaling, hook points). Phase 7: each sources dims via `harness.models.get_model_config`, carries no `sys.path` hack, takes `--engine` guarded to `vllm` (the ablations probe fork-specific steering internals), and stamps the `engine` block on results.
 - entry_points: [scripts/bench_cuda_graphs.py, scripts/bench_config_scaling.py, scripts/bench_hook_points.py]
 - depends_on: [core]
 - doc: docs/features/ablation_benchmarks.md

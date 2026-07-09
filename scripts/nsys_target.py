@@ -14,22 +14,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import time
-from pathlib import Path
 
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
+from steering_bench.harness.args import engine_names
+from steering_bench.harness.models import get_model_config
 from steering_bench.vectors import random_steering_vectors
-
-MODEL_CONFIGS = {
-    "google/gemma-3-4b-it": {"hidden_size": 2560, "num_layers": 34},
-    "google/gemma-3-12b-it": {"hidden_size": 3840, "num_layers": 48},
-    "google/gemma-3-27b-it": {"hidden_size": 5376, "num_layers": 62},
-    "meta-llama/Llama-3.2-1B": {"hidden_size": 2048, "num_layers": 16},
-}
 
 
 def main():
@@ -64,11 +55,26 @@ def main():
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--iters", type=int, default=2)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.6)
+    parser.add_argument(
+        "--engine",
+        default="vllm",
+        choices=engine_names(),
+        help="Engine adapter. This nsys profiling target drives the vLLM-fork "
+             "steering path in-process; only --engine vllm is supported "
+             "(no engine-agnostic equivalent).",
+    )
     args = parser.parse_args()
+
+    if args.engine != "vllm":
+        parser.error(
+            f"engine {args.engine!r} not supported: this nsys target drives "
+            "the vLLM-fork steering path, which has no engine-agnostic "
+            "equivalent. Use --engine vllm."
+        )
 
     from vllm import LLM, SamplingParams
 
-    model_config = MODEL_CONFIGS.get(args.model, {"hidden_size": 2560, "num_layers": 34})
+    model_config = get_model_config(args.model)
     enable_steering = args.mode == "steering"
 
     num_active = args.num_active if args.num_active >= 0 else args.batch_size
@@ -108,8 +114,8 @@ def main():
         if args.shared_vector:
             # All active slots share one vector → 1 distinct config.
             vectors = random_steering_vectors(
-                hidden_size=model_config["hidden_size"],
-                num_layers=model_config["num_layers"],
+                hidden_size=model_config.hidden_size,
+                num_layers=model_config.num_layers,
                 hook_points=["post_block"],
                 scale=0.1,
                 seed=42,
@@ -127,8 +133,8 @@ def main():
             steered_sps: list[SamplingParams] = []
             for i in range(num_active):
                 vectors = random_steering_vectors(
-                    hidden_size=model_config["hidden_size"],
-                    num_layers=model_config["num_layers"],
+                    hidden_size=model_config.hidden_size,
+                    num_layers=model_config.num_layers,
                     hook_points=["post_block"],
                     scale=0.1,
                     seed=42 + i,
