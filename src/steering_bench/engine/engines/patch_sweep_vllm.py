@@ -54,18 +54,27 @@ class VllmPatchSweepEngine(PatchSweepEngine):
         self._timeout_s = timeout_s
 
     def run_sweep(self, request: PatchSweepRequest) -> PatchSweepResult:
-        from steering_bench.external.vllm_patch_sweep import run_patch_sweep
+        from steering_bench.external.vllm_patch_sweep import (
+            PatchSweepServerError,
+            run_patch_sweep,
+        )
 
         if self._base_url is None:
             raise PatchSweepError("run_sweep called before setup()")
-        raw = run_patch_sweep(
-            self._base_url,
-            request.clean,
-            request.corrupt,
-            request.answer,
-            request.n_layers,
-            self._timeout_s,
-        )
+        try:
+            raw = run_patch_sweep(
+                self._base_url,
+                request.clean,
+                request.corrupt,
+                request.answer,
+                request.n_layers,
+                self._timeout_s,
+            )
+        except PatchSweepServerError as e:
+            # A rejected request (e.g. a server missing --patch-source-cache-bytes)
+            # carries the server's own message + a launch-flag hint; surface it as
+            # a PatchSweepError so the benchmark reports it cleanly.
+            raise PatchSweepError(str(e)) from e
         return PatchSweepResult.from_vllm_dict(raw)
 
     def teardown(self) -> None:

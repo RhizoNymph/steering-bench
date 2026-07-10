@@ -1,11 +1,25 @@
 """vLLM one-call activation-patching sweep over HTTP.
 
-Measures ``POST /v1/patch_sweep`` end-to-end against a running
-patching-enabled server (``--enable-patching``). The single request covers
-what the TransformerLens variants do in-process AND more: server-side
-auto-capture of the clean run, both baselines, exact answer-token grading,
-the batch-noise-floor rerun, and source cleanup — so the measured wall time
-is a strict superset of the study.
+Measures ``POST /v1/patch_sweep`` end-to-end against a running server. The
+single request covers what the TransformerLens variants do in-process AND
+more: server-side auto-capture of the clean run, both baselines, exact
+answer-token grading, the batch-noise-floor rerun, and source cleanup — so
+the measured wall time is a strict superset of the study.
+
+Server requirements
+-------------------
+The target server must be launched with ALL THREE of::
+
+    --enable-patching                    # mount the /v1/patch_sweep route
+    --capture-consumers patch_source     # the consumer that stores clean-run rows
+    --patch-source-cache-bytes <N>       # allocate the source store (e.g. 2000000000)
+
+The one-call auto-capture path (this client sends ``clean_prompt`` + a fresh
+``source_run``) taps the clean run through the ``patch_source`` consumer. If
+``--patch-source-cache-bytes`` is unset, the store does not exist and captured
+rows are silently dropped, so the sweep then 400s with ``patch source not
+found``. :func:`run_patch_sweep` surfaces that server message (with this flag
+hint) rather than a bare HTTP error, so a misconfigured server is obvious.
 """
 
 from __future__ import annotations
@@ -13,6 +27,34 @@ from __future__ import annotations
 import time
 import uuid
 from typing import Any
+
+_SERVER_FLAG_HINT = (
+    "Launch the server with: --enable-patching --capture-consumers patch_source "
+    "--patch-source-cache-bytes <N> (e.g. 2000000000). A missing source store "
+    "silently drops captured rows, yielding this 'patch source not found' 400."
+)
+
+
+class PatchSweepServerError(RuntimeError):
+    """The patch-sweep server rejected the request (non-2xx), with its message."""
+
+
+def _server_error_detail(resp: Any) -> str:
+    """Extract the server's ``{"error": ...}`` message from a failed response.
+
+    Appends the launch-flag hint when the message names the missing-source /
+    patching-disabled conditions, so the operator sees the fix inline instead
+    of an opaque ``HTTP 400``.
+    """
+    try:
+        detail = resp.json().get("error") or resp.text
+    except (ValueError, AttributeError):
+        detail = getattr(resp, "text", "") or "<no response body>"
+    detail = str(detail)
+    lowered = detail.lower()
+    if "patch source not found" in lowered or "enable-patching" in lowered:
+        detail = f"{detail}\n{_SERVER_FLAG_HINT}"
+    return f"patch_sweep HTTP {resp.status_code}: {detail}"
 
 
 def normalize_base_url(base_url: str) -> str:
@@ -69,7 +111,8 @@ def run_patch_sweep(
         f"{normalize_base_url(base_url)}/patch_sweep", json=body, timeout=timeout_s
     )
     wall = time.perf_counter() - t0
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        raise PatchSweepServerError(_server_error_detail(resp))
     data = resp.json()
 
     cells = sum(1 for row in data["grid"] for v in row if v is not None)

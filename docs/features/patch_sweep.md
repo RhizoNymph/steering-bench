@@ -25,6 +25,31 @@ distinct axis** — not steering-generate, not capture, not online serving.
 - Generation latency / streaming metrics (those are the `Benchmark` /
   `ServingEngine` axes).
 
+## Running the vLLM sweep (server requirements)
+
+Unlike the serving axis, the vLLM patch-sweep adapter does **not** launch its own
+server — it drives an existing one via `--base-url` (bare host or `/v1`-suffixed;
+both normalized). That server must be launched with **all three** flags:
+
+```
+--enable-patching                 # mounts the /v1/patch_sweep route
+--capture-consumers patch_source  # the consumer that stores clean-run activations
+--patch-source-cache-bytes <N>    # allocates the source store, e.g. 2000000000
+```
+
+The client uses the server's **one-call auto-capture** path (it sends
+`clean_prompt` + a fresh `source_run`), so no separate capture step is needed —
+but the auto-captured rows are written through the `patch_source` consumer into
+the source store. **If `--patch-source-cache-bytes` is omitted the store does not
+exist, captured rows are silently dropped, and the sweep 400s with `patch source
+not found`.** `run_patch_sweep` surfaces the server's error body plus this
+flag hint (via `PatchSweepServerError`, rewrapped as `PatchSweepError`), so a
+misconfigured server is diagnosable instead of an opaque HTTP 400.
+
+Validated end-to-end on an RTX 3090 against the fork's `feat/integration` build
+(`gemma-3-4b-it`): `run patch-sweep --variants vllm_sweep --base-url
+http://host:8765/v1 --num-layers 12` → 72 cells at ~59 cells/s, argmax L4@4.
+
 ## Result shape (`PatchSweepResult`)
 
 Common fields (every backend): `variant`, `cells`, `n_layers`, `n_positions`,
