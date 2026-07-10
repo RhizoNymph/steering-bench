@@ -11,6 +11,8 @@ import sys
 import pytest
 
 from steering_bench.engine.engines.vllm import (
+    VllmSteeringEngine,
+    device_used_memory_mb,
     named_payload_from_spec,
     named_ref_to_kwargs,
     spec_to_native,
@@ -131,3 +133,23 @@ def test_steering_kwargs_rejects_offline_per_row_scales() -> None:
         steering_kwargs(scaled)
     # an unscaled spec is unaffected
     assert "steering_vectors" in steering_kwargs(spec)
+
+
+def test_device_used_memory_mb_computes_total_minus_free() -> None:
+    """Finding #1: the vLLM engine reports DEVICE-wide used memory
+    (total - free) in MB, since its model lives in an EngineCore subprocess and
+    driver-process ``memory_allocated()`` reads 0. Inject a (free, total)
+    reporter to test the pure computation without a real GPU."""
+    free = 3 * 1024 * 1024 * 1024  # 3 GiB free
+    total = 8 * 1024 * 1024 * 1024  # 8 GiB total
+    used_mb = device_used_memory_mb(lambda: (free, total))
+    assert isinstance(used_mb, float)
+    assert used_mb == (total - free) / (1024 * 1024)  # 5 GiB in MB == 5120.0
+    assert used_mb == 5120.0
+
+
+def test_memory_allocated_mb_returns_float() -> None:
+    # On a CPU-only host CUDA is unavailable, so the honest fallback is 0.0 —
+    # but always a float, never an exception.
+    mb = VllmSteeringEngine().memory_allocated_mb()
+    assert isinstance(mb, float)

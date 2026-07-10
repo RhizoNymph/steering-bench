@@ -177,6 +177,26 @@ non-default `scale` now raise instead of dropping the scale; (2) an offline
 inline `SteeringSpec` carrying per-row `scales` now raises instead of applying
 vectors unscaled (only the serving packer honors per-row scales).
 
+**End-to-end validation on GPU (node0) — two follow-up fixes:**
+- **`memory_mb: 0.0` for the vLLM engine.** vLLM V1 runs the model in an
+  EngineCore *subprocess*, so `torch.cuda.memory_allocated()` in the driver
+  process (what the base `_gpu_memory_mb` reads) sees 0 — a meaningless number
+  for this engine. `VllmSteeringEngine.memory_allocated_mb` now reports
+  *device-wide* used memory (`total - free` via `torch.cuda.mem_get_info`,
+  factored into the pure, testable `device_used_memory_mb` helper), the honest
+  measure given the subprocess architecture; it falls back to `0.0` when CUDA is
+  unavailable. The base helper is unchanged — other engines load in-process and
+  their per-process reading is correct.
+- **patch-sweep `--base-url` inconsistency.** The serving path auto-appends
+  `/v1`, but patch-sweep required the caller to pass a `/v1`-suffixed URL. A new
+  `normalize_base_url` (in `external/vllm_patch_sweep.py`) accepts a bare host
+  (`http://host:port`) or an already-`/v1`-suffixed URL and derives the `/v1`
+  endpoint itself; `server_healthy` and `run_patch_sweep` are now robust to both
+  forms and the CLI default is bare (`http://localhost:8000`), consistent with
+  serving. Back-compat preserved for URLs already containing `/v1`. The
+  `run_patch_sweep` request *body* is unchanged — a separate investigation owns
+  it and a body fix may follow.
+
 **Open caveats to confirm during GPU acceptance:**
 - The migrated `bench_dynamic_steering.py` / capture scripts now pass
   `SteeringConfig` defaults (`enable_prefix_caching=True`, `max_steering_configs=4`)
