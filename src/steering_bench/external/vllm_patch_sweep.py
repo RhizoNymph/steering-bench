@@ -8,18 +8,23 @@ the measured wall time is a strict superset of the study.
 
 Server requirements
 -------------------
-The target server must be launched with ALL THREE of::
+The target server must be launched with::
 
     --enable-patching                    # mount the /v1/patch_sweep route
     --capture-consumers patch_source     # the consumer that stores clean-run rows
-    --patch-source-cache-bytes <N>       # allocate the source store (e.g. 2000000000)
+
+The clean-run source store **auto-sizes from the model** as of the fork's
+source-store auto-default (RhizoNymph/vllm#262), so ``--patch-source-cache-bytes``
+is optional — pass it only to override the auto budget, or ``0`` to disable the
+store. On fork builds predating that fix the store defaults to *disabled*, so
+there ``--patch-source-cache-bytes <N>`` (e.g. 2000000000) is also required.
 
 The one-call auto-capture path (this client sends ``clean_prompt`` + a fresh
-``source_run``) taps the clean run through the ``patch_source`` consumer. If
-``--patch-source-cache-bytes`` is unset, the store does not exist and captured
-rows are silently dropped, so the sweep then 400s with ``patch source not
-found``. :func:`run_patch_sweep` surfaces that server message (with this flag
-hint) rather than a bare HTTP error, so a misconfigured server is obvious.
+``source_run``) taps the clean run through the ``patch_source`` consumer into
+that store. If the store is absent, captured rows are silently dropped and the
+sweep 400s with ``patch source not found``; :func:`run_patch_sweep` surfaces
+that server message (with a flag hint) rather than a bare HTTP error, so a
+misconfigured server is obvious.
 """
 
 from __future__ import annotations
@@ -30,8 +35,10 @@ from typing import Any
 
 _SERVER_FLAG_HINT = (
     "Launch the server with: --enable-patching --capture-consumers patch_source "
-    "--patch-source-cache-bytes <N> (e.g. 2000000000). A missing source store "
-    "silently drops captured rows, yielding this 'patch source not found' 400."
+    "(the source store auto-sizes as of the fork's source-store auto-default; on "
+    "older builds also pass --patch-source-cache-bytes <N>, e.g. 2000000000). A "
+    "missing source store silently drops captured rows, yielding this 'patch "
+    "source not found' 400."
 )
 
 

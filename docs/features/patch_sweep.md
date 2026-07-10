@@ -29,26 +29,34 @@ distinct axis** — not steering-generate, not capture, not online serving.
 
 Unlike the serving axis, the vLLM patch-sweep adapter does **not** launch its own
 server — it drives an existing one via `--base-url` (bare host or `/v1`-suffixed;
-both normalized). That server must be launched with **all three** flags:
+both normalized). That server must be launched with:
 
 ```
 --enable-patching                 # mounts the /v1/patch_sweep route
 --capture-consumers patch_source  # the consumer that stores clean-run activations
---patch-source-cache-bytes <N>    # allocates the source store, e.g. 2000000000
 ```
+
+The clean-run source store **auto-sizes from the model** as of the fork's
+source-store auto-default ([RhizoNymph/vllm#262](https://github.com/RhizoNymph/vllm/pull/262)),
+so `--patch-source-cache-bytes` is **optional** — pass it only to override the
+auto budget, or `0` to disable the store. On fork builds *predating* that fix the
+store defaults to disabled, so there `--patch-source-cache-bytes <N>`
+(e.g. 2000000000) is also required.
 
 The client uses the server's **one-call auto-capture** path (it sends
 `clean_prompt` + a fresh `source_run`), so no separate capture step is needed —
-but the auto-captured rows are written through the `patch_source` consumer into
-the source store. **If `--patch-source-cache-bytes` is omitted the store does not
-exist, captured rows are silently dropped, and the sweep 400s with `patch source
-not found`.** `run_patch_sweep` surfaces the server's error body plus this
-flag hint (via `PatchSweepServerError`, rewrapped as `PatchSweepError`), so a
-misconfigured server is diagnosable instead of an opaque HTTP 400.
+the auto-captured rows are written through the `patch_source` consumer into the
+source store. **If the store is absent** (an old build with no cache-bytes, or an
+explicit `--patch-source-cache-bytes 0`), **captured rows are silently dropped and
+the sweep 400s with `patch source not found`.** `run_patch_sweep` surfaces the
+server's error body plus a flag hint (via `PatchSweepServerError`, rewrapped as
+`PatchSweepError`), so a misconfigured server is diagnosable instead of an opaque
+HTTP 400.
 
 Validated end-to-end on an RTX 3090 against the fork's `feat/integration` build
-(`gemma-3-4b-it`): `run patch-sweep --variants vllm_sweep --base-url
-http://host:8765/v1 --num-layers 12` → 72 cells at ~59 cells/s, argmax L4@4.
+(`gemma-3-4b-it`): with only `--enable-patching --capture-consumers patch_source`
+(store auto-sized to ~1.07 GB), `run patch-sweep --variants vllm_sweep --base-url
+http://host:8765/v1` returns real grids (48–72 cells, argmax L4@4).
 
 ## Result shape (`PatchSweepResult`)
 
