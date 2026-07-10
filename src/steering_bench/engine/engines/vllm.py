@@ -9,6 +9,7 @@ The engine methods import vllm lazily inside their bodies, mirroring the legacy
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from steering_bench.engine.base import Capabilities, SteeringConfig, SteeringEngine
@@ -21,6 +22,33 @@ from steering_bench.engine.spec import (
     Steering,
     SteeringSpec,
 )
+
+_MB = 1024 * 1024
+
+
+def device_used_memory_mb(
+    mem_get_info: Callable[[], tuple[int, int]] | None = None,
+) -> float:
+    """Device-wide used GPU memory in MB from a ``(free, total)`` reporter.
+
+    Pure w.r.t. the injected ``mem_get_info`` (defaulting to
+    ``torch.cuda.mem_get_info``): used = ``total - free``, converted to MB. This
+    is the *device-wide* used memory, not this process's allocation — the honest
+    measure for the vLLM engine, whose model lives in an EngineCore subprocess
+    (see :meth:`VllmSteeringEngine.memory_allocated_mb`). Returns ``0.0`` when
+    torch / CUDA is unavailable.
+    """
+    if mem_get_info is None:
+        try:
+            import torch
+        except ImportError:
+            return 0.0
+        if not torch.cuda.is_available():
+            return 0.0
+        mem_get_info = torch.cuda.mem_get_info
+    free, total = mem_get_info()
+    return (total - free) / _MB
+
 
 # vLLM load defaults for knobs the typed SteeringConfig does not cover.
 _DEFAULT_LOAD_OPTS: dict[str, Any] = {
@@ -233,7 +261,16 @@ class VllmSteeringEngine(SteeringEngine):
         ]
 
     def memory_allocated_mb(self) -> float:
-        return self._gpu_memory_mb()
+        """Device-wide used GPU memory in MB (not per-process).
+
+        vLLM V1 runs the model in an EngineCore *subprocess*, so
+        ``torch.cuda.memory_allocated()`` in this driver process (what the base
+        ``_gpu_memory_mb`` reads) reports 0 and is meaningless here. Instead we
+        report device-level used memory (``total - free`` via
+        ``torch.cuda.mem_get_info``), which is the honest number given the
+        subprocess architecture. Falls back to ``0.0`` when CUDA is unavailable.
+        """
+        return device_used_memory_mb()
 
     def teardown(self) -> None:
         self._llm = None

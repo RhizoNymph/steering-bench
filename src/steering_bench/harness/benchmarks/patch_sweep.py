@@ -135,7 +135,14 @@ class PatchSweepBenchmark:
     def add_args(parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--num-layers", type=int, default=28)
         parser.add_argument("--dtype", default="bfloat16")
-        parser.add_argument("--base-url", default="http://localhost:8000/v1")
+        parser.add_argument(
+            "--base-url",
+            default="http://localhost:8000",
+            help=(
+                "Server base URL. A bare host (http://host:port) or a /v1-suffixed "
+                "URL both work; the /v1 endpoint is derived automatically."
+            ),
+        )
         parser.add_argument(
             "--variants",
             default=DEFAULT_VARIANTS,

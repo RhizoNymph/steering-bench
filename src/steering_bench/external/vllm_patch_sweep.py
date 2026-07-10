@@ -15,10 +15,25 @@ import uuid
 from typing import Any
 
 
+def normalize_base_url(base_url: str) -> str:
+    """Normalize a server base URL to its OpenAI-compatible ``/v1`` root.
+
+    Accepts either a bare host (``http://host:port``) or an already-``/v1``
+    -suffixed URL and returns the ``/v1`` form, so patch-sweep callers pass the
+    same bare base URL the serving path accepts (which auto-appends ``/v1``).
+    Idempotent: a URL already ending in ``/v1`` is returned unchanged apart from
+    any trailing slash.
+    """
+    trimmed = base_url.rstrip("/")
+    if trimmed.endswith("/v1"):
+        return trimmed
+    return f"{trimmed}/v1"
+
+
 def server_healthy(base_url: str, timeout: float = 3.0) -> bool:
     import httpx
 
-    root = base_url.rstrip("/").removesuffix("/v1")
+    root = normalize_base_url(base_url).removesuffix("/v1")
     try:
         return httpx.get(f"{root}/health", timeout=timeout).status_code == 200
     except httpx.HTTPError:
@@ -51,7 +66,7 @@ def run_patch_sweep(
     }
     t0 = time.perf_counter()
     resp = httpx.post(
-        f"{base_url.rstrip('/')}/patch_sweep", json=body, timeout=timeout_s
+        f"{normalize_base_url(base_url)}/patch_sweep", json=body, timeout=timeout_s
     )
     wall = time.perf_counter() - t0
     resp.raise_for_status()
