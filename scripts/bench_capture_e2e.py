@@ -144,6 +144,21 @@ def _build_configs(
                 params={"hooks": {"post_block": all_layers}, "positions": "all", "level": "WARNING"},
             )
         ], None),
+        # Decomposition of logging_max: isolate the layer-breadth axis
+        # (all layers, single position) vs the position-count axis
+        # (single layer, all positions).
+        ("logging_layers", [
+            CaptureConsumerSpec(
+                name="logging",
+                params={"hooks": {"post_block": all_layers}, "positions": "last_prompt", "level": "WARNING"},
+            )
+        ], None),
+        ("logging_positions", [
+            CaptureConsumerSpec(
+                name="logging",
+                params={"hooks": {"post_block": [mid_layer]}, "positions": "all", "level": "WARNING"},
+            )
+        ], None),
         ("logging_3x_same_hook", [
             CaptureConsumerSpec(
                 name="logging",
@@ -158,6 +173,16 @@ def _build_configs(
             consumer="filesystem",
             hooks={"post_block": [mid_layer]},
             positions="last_prompt",
+            tag="benchmark",
+        )),
+        # Analog of logging_max for the filesystem sink: all layers, all
+        # positions written to disk (sites are set via the per-request capture).
+        ("filesystem_max", [
+            CaptureConsumerSpec(name="filesystem", params={"root": tmpdir, "writer_threads": 4})
+        ], RequestCapture(
+            consumer="filesystem",
+            hooks={"post_block": all_layers},
+            positions="all",
             tag="benchmark",
         )),
         ("driver_minimal", [
